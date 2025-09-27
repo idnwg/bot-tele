@@ -142,7 +142,7 @@ def cmd_help(message):
         "`doodstream <link-mega>` → upload hasilnya ke Doodstream\n"
         "`terabox <link-mega>` → upload hasilnya ke Terabox\n"
     )
-    send(message.chat.id, help_text, parse_mode="Markdown")
+    send(message.chat.id, help_text, parse_mode=None)
 
 @bot.message_handler(commands=["status"])
 def cmd_status(message):
