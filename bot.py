@@ -1,98 +1,209 @@
+#!/usr/bin/env python3
 import os
 import telebot
-import subprocess
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
+from mega import Mega
 from pathlib import Path
-from threading import Thread
+import subprocess
+import threading
+import requests
+import json
 import time
+import shlex
 
-# Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+DOOD_KEY = os.getenv("DOODSTREAM_API_KEY")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
 DOWNLOAD_PATH = Path("./downloads")
 DOWNLOAD_PATH.mkdir(exist_ok=True)
 
-# Simulasi job queue
+mega_instance = Mega()
+mega_account = None
 job_queue = []
+lock = threading.Lock()
+user_context = {}  # menyimpan state interaktif user
 
-# Fungsi helper untuk upload via TeraboxUploaderCLI
-def upload_terabox(folder_path: Path):
-    try:
-        # Panggil teraboxcli dengan recursive upload
-        cmd = ["python3", "teraboxcli/main.py", "upload", str(folder_path), "--recursive"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        success = "UPLOAD      : Done" in result.stdout or "Program closing" in result.stdout
-        return success, result.stdout
-    except Exception as e:
-        return False, str(e)
+# ---------- Helper Functions ----------
 
-# Fungsi worker job queue
+def add_job(func, args):
+    with lock:
+        job_queue.append((func, args))
+
 def process_jobs():
     while True:
         if job_queue:
-            job = job_queue.pop(0)
-            folder, user_id = job
-            bot.send_message(user_id, f"🚀 Mulai upload folder: {folder.name}")
-            success, output = upload_terabox(folder)
-            if success:
-                bot.send_message(user_id, f"✅ Upload selesai: {folder.name}\nOutput:\n{output}")
-            else:
-                bot.send_message(user_id, f"❌ Upload gagal: {folder.name}\nError:\n{output}")
-        time.sleep(2)
+            with lock:
+                func, args = job_queue.pop(0)
+            func(*args)
+        time.sleep(1)
 
-Thread(target=process_jobs, daemon=True).start()
+def send_status(chat_id, text):
+    bot.send_message(chat_id, text)
 
-# Command start/help
-@bot.message_handler(commands=["start", "help"])
-def cmd_help(message):
-    help_text = """
-🛠️ *Bot Mega → TeraboxUploaderCLI*
+def login_mega(email, password):
+    global mega_account
+    try:
+        mega_account = mega_instance.login(email, password)
+        return True, "✅ Login berhasil!"
+    except Exception as e:
+        return False, f"❌ Login gagal: {str(e)}"
 
-Commands:
-/listfolders - Lihat folder di downloads
+def logout_mega():
+    global mega_account
+    mega_account = None
+    return "✅ Logout berhasil."
+
+def download_mega(url, dest_folder):
+    if not mega_account:
+        return "❌ Belum login Mega!"
+    try:
+        dest_path = DOWNLOAD_PATH / dest_folder
+        dest_path.mkdir(exist_ok=True)
+        mega_account.download_url(url, str(dest_path))
+        return f"✅ Download selesai: {dest_folder}"
+    except Exception as e:
+        return f"❌ Download gagal: {str(e)}"
+
+def rename_file_or_folder(path, prefix=""):
+    target = Path(path)
+    if prefix:
+        new_name = prefix + "_" + target.name
+        target.rename(target.parent / new_name)
+        return str(target.parent / new_name)
+    return str(target)
+
+def upload_terabox(path):
+    cli_path = Path("./teraboxcli/main.py")
+    if not cli_path.exists():
+        return "❌ TeraboxUploaderCLI tidak ditemukan!"
+    try:
+        cmd = f"python3 {cli_path} upload {shlex.quote(str(path))} --recursive"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        return result.stdout + result.stderr
+    except Exception as e:
+        return f"❌ Upload Terabox gagal: {str(e)}"
+
+def upload_doodstream(path):
+    files_to_upload = []
+    if Path(path).is_file():
+        files_to_upload = [path]
+    else:
+        for f in Path(path).rglob("*"):
+            if f.is_file():
+                files_to_upload.append(f)
+    responses = []
+    for file_path in files_to_upload:
+        try:
+            with open(file_path, "rb") as f:
+                resp = requests.post(
+                    f"https://doodapi.com/api/upload?key={DOOD_KEY}",
+                    files={"file": f}
+                )
+                data = resp.json()
+                if data.get("status") == "success":
+                    responses.append(f"{file_path} → {data.get('result')}")
+                else:
+                    responses.append(f"❌ {file_path} → {data}")
+        except Exception as e:
+            responses.append(f"❌ {file_path} → {str(e)}")
+    return "\n".join(responses)
+
+# ---------- Telegram Commands ----------
+
+@bot.message_handler(commands=["help"])
+def cmd_help(msg):
+    text = """
+💡 Daftar Perintah:
+/loginmega <email> <password> - Login Mega
+/logoutmega - Logout Mega
+/select - Pilih folder untuk download/upload
 /status - Lihat job queue
-/download <folder1> <folder2> ... - Tambahkan folder ke queue upload
-"""
-    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+    """
+    bot.send_message(msg.chat.id, text)
 
-# List folder lokal
-@bot.message_handler(commands=["listfolders"])
-def list_folders(message):
+@bot.message_handler(commands=["loginmega"])
+def cmd_loginmega(msg):
+    try:
+        _, email, password = msg.text.split(maxsplit=2)
+        ok, text = login_mega(email, password)
+        bot.send_message(msg.chat.id, text)
+    except ValueError:
+        bot.send_message(msg.chat.id, "❌ Format salah! Gunakan: /loginmega email password")
+
+@bot.message_handler(commands=["logoutmega"])
+def cmd_logoutmega(msg):
+    bot.send_message(msg.chat.id, logout_mega())
+
+# ---------- Interactive Multi-folder Selection ----------
+
+@bot.message_handler(commands=["select"])
+def cmd_select(msg):
+    user_context[msg.chat.id] = {"stage": "choose_folder"}
     folders = [f.name for f in DOWNLOAD_PATH.iterdir() if f.is_dir()]
-    if folders:
-        bot.send_message(message.chat.id, "📂 Folder tersedia:\n" + "\n".join(folders))
-    else:
-        bot.send_message(message.chat.id, "📂 Tidak ada folder di downloads.")
-
-# Status job queue
-@bot.message_handler(commands=["status"])
-def status(message):
-    if job_queue:
-        status_text = "📋 Job queue:\n" + "\n".join([f"{f.name}" for f, _ in job_queue])
-    else:
-        status_text = "📋 Job queue kosong."
-    bot.send_message(message.chat.id, status_text)
-
-# Download command (simulasi) dan tambah ke queue
-@bot.message_handler(commands=["download"])
-def download_cmd(message):
-    args = message.text.split()[1:]
-    if not args:
-        bot.send_message(message.chat.id, "❌ Format salah! Gunakan: /download <folder1> <folder2> ...")
+    if not folders:
+        bot.send_message(msg.chat.id, "❌ Tidak ada folder tersedia untuk dipilih.")
         return
-    added = []
-    for folder_name in args:
-        folder_path = DOWNLOAD_PATH / folder_name
-        if folder_path.exists():
-            job_queue.append((folder_path, message.chat.id))
-            added.append(folder_name)
-        else:
-            bot.send_message(message.chat.id, f"❌ Folder tidak ditemukan: {folder_name}")
-    if added:
-        bot.send_message(message.chat.id, f"✅ Folder ditambahkan ke queue: {', '.join(added)}")
 
-# Jalankan bot polling
+    markup = InlineKeyboardMarkup()
+    for folder in folders:
+        markup.add(InlineKeyboardButton(folder, callback_data=f"folder|{folder}"))
+    bot.send_message(msg.chat.id, "Pilih folder yang ingin diproses:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    chat_id = call.message.chat.id
+    if chat_id not in user_context:
+        return
+
+    context = user_context[chat_id]
+
+    if call.data.startswith("folder|"):
+        folder = call.data.split("|")[1]
+        context["selected_folder"] = folder
+        context["stage"] = "choose_target"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("Terabox", callback_data="target|terabox"))
+        markup.add(InlineKeyboardButton("Doodstream", callback_data="target|doodstream"))
+        markup.add(InlineKeyboardButton("Both", callback_data="target|both"))
+        bot.edit_message_text("Pilih target upload:", chat_id=chat_id,
+                              message_id=call.message.message_id,
+                              reply_markup=markup)
+
+    elif call.data.startswith("target|"):
+        target = call.data.split("|")[1]
+        folder = context.get("selected_folder")
+        if not folder:
+            bot.send_message(chat_id, "❌ Folder tidak ditemukan di context.")
+            return
+
+        def job_func(path, target, chat_id):
+            output = ""
+            if target in ("terabox", "both"):
+                output += upload_terabox(DOWNLOAD_PATH / path) + "\n"
+            if target in ("doodstream", "both"):
+                output += upload_doodstream(DOWNLOAD_PATH / path)
+            bot.send_message(chat_id, f"✅ Job selesai:\n{output}")
+
+        add_job(job_func, (folder, target, chat_id))
+        bot.edit_message_text(f"✅ Job ditambahkan untuk folder {folder} ke {target}", chat_id=chat_id,
+                              message_id=call.message.message_id)
+        del user_context[chat_id]
+
+@bot.message_handler(commands=["status"])
+def cmd_status(msg):
+    if not job_queue:
+        bot.send_message(msg.chat.id, "✅ Tidak ada job antrian")
+    else:
+        jobs = "\n".join([str(j[1]) for j in job_queue])
+        bot.send_message(msg.chat.id, f"⏳ Job queue:\n{jobs}")
+
+# ---------- Start Job Processor Thread ----------
+
+threading.Thread(target=process_jobs, daemon=True).start()
+
+# ---------- Start Bot Polling ----------
+
 bot.infinity_polling()
