@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Final bot.py
+Final bot.py (AMAN)
 - Mega.nz -> Terabox / Doodstream
 - Prefix rename untuk semua foto/video (FORMAT: "<PREFIX> 01.ext")
 - Queue worker, per-user settings
 - Commands: /start, /help, /status, /cleanup, /set_delete, /setprefix, /listfolders, /service
+- API keys & connect key diambil dari environment variables
 """
 
 import os
@@ -14,7 +15,6 @@ import subprocess
 import threading
 import queue
 import shutil
-import time
 from datetime import datetime
 
 import requests
@@ -22,33 +22,36 @@ import telebot
 from shutil import which
 
 # ================== CONFIG ==================
-BOT_TOKEN = "ISI_TOKEN_BOT_MU"
-TERABOX_CONNECT_KEY = "ISI_CONNECT_KEY_TERABOX"
-DOODSTREAM_API_KEY = "ISI_API_KEY_DOODSTREAM"
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # <-- ambil dari environment
+TERABOX_CONNECT_KEY = os.getenv("TERABOX_CONNECT_KEY")
+DOODSTREAM_API_KEY = os.getenv("DOODSTREAM_API_KEY")
 
-BASE_DOWNLOAD_DIR = "downloads"   # local download root
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN tidak ditemukan! Set dulu environment variable: export BOT_TOKEN='...'")
+
+if not TERABOX_CONNECT_KEY:
+    print("⚠️ TERABOX_CONNECT_KEY belum diset, upload ke Terabox tidak akan jalan.")
+
+if not DOODSTREAM_API_KEY:
+    print("⚠️ DOODSTREAM_API_KEY belum diset, upload ke Doodstream tidak akan jalan.")
+
+BASE_DOWNLOAD_DIR = "downloads"
 os.makedirs(BASE_DOWNLOAD_DIR, exist_ok=True)
 
-# downloader candidates
 DL_CANDIDATES = ["megadl", "mega-get", "megatools"]
-
-# default behaviour
 DELETE_AFTER_UPLOAD_DEFAULT = False
 
-# media extensions considered for renaming
 MEDIA_EXT = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
              ".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv")
 
-# =============== STATE ====================
 bot = telebot.TeleBot(BOT_TOKEN)
-user_state = {}   # per-chat state: { chat_id: { "prefix": "...", "service": "terabox"/"doodstream", "delete_after": bool } }
+user_state = {}   # { chat_id: {prefix, service, delete_after} }
 job_q = queue.Queue()
 current_job = None
 state_lock = threading.Lock()
 
 # ============== UTIL FUNCTIONS ==============
 def send(chat_id, text, **kwargs):
-    """Send plain text (no Markdown parsing) to avoid formatting errors."""
     try:
         bot.send_message(chat_id, text, **kwargs)
     except Exception as e:
@@ -72,19 +75,15 @@ def run_cmd(cmd, cwd=None, timeout=None):
         return 124, "", f"TimeoutExpired: {e}"
 
 def extract_mega_link(text):
-    """Extract Mega.nz file or folder link from a text blob."""
     if not text:
         return None
-    # Accept keys with various chars after # until whitespace
     m = re.search(r"(https?://mega\.nz/(?:file|folder)/[A-Za-z0-9_-]+(?:#[A-Za-z0-9!@\$%^&*()_\-+=\.,~]+)?)", text)
     return m.group(1) if m else None
 
 def sanitize_filename(name):
     name = name.strip()
-    # allow spaces and @ and - and underscore; remove slashes and other illegal chars
     name = name.replace("/", "_").replace("\\", "_")
     name = re.sub(r'[<>:"\|\?\*]', '_', name)
-    # collapse multiple spaces
     name = re.sub(r'\s+', ' ', name).strip()
     return name or "untitled"
 
@@ -93,30 +92,18 @@ def is_media_file(filename):
 
 # ============ RENAME MEDIA FILES ============
 def rename_media_files_for_job(chat_id, local_dir):
-    """
-    Rename all media files in local_dir using user's prefix.
-    Format: "<PREFIX> 01.ext", "<PREFIX> 02.ext", ...
-    Only affects files matching MEDIA_EXT. Renaming is per-job folder.
-    """
     prefix = user_state.get(chat_id, {}).get("prefix")
     if not prefix:
-        return  # no prefix set for this user
-
-    # collect media files
+        return
     files = sorted([f for f in os.listdir(local_dir) if is_media_file(f)])
     if not files:
         return
-
-    # prepare sanitized prefix (keep @ and spaces)
     prefix_safe = sanitize_filename(prefix)
-    # If prefix had spaces, keep them (we sanitized to single spaces)
-    # rename sequentially
     for idx, fname in enumerate(files, start=1):
         old_path = os.path.join(local_dir, fname)
         ext = os.path.splitext(fname)[1]
         new_name = f"{prefix_safe} {idx:02d}{ext}"
         new_path = os.path.join(local_dir, new_name)
-        # Avoid overwriting: if exists, append timestamp (unlikely)
         if os.path.exists(new_path):
             tstamp = datetime.now().strftime("%Y%m%d%H%M%S")
             new_name = f"{prefix_safe} {idx:02d}_{tstamp}{ext}"
@@ -128,22 +115,15 @@ def rename_media_files_for_job(chat_id, local_dir):
 
 # ============ UPLOAD HELPERS ================
 def upload_terabox_path(local_path, remote_path):
-    """
-    Upload file or folder to Terabox using teraboxcli and connect key.
-    This assumes teraboxcli supports:
-      teraboxcli --connect-key <KEY> upload <local> <remote>
-    Adjust command if your CLI differs.
-    """
-    # Use same command for file or folder
+    if not TERABOX_CONNECT_KEY:
+        return 1, "", "TERABOX_CONNECT_KEY belum diset"
     cmd = f'teraboxcli --connect-key {shlex.quote(TERABOX_CONNECT_KEY)} upload {shlex.quote(local_path)} {shlex.quote(remote_path)}'
     rc, out, err = run_cmd(cmd, timeout=60*60*2)
     return rc, out, err
 
 def upload_doodstream_file(local_file):
-    """
-    Upload single file to Doodstream API.
-    Steps: GET server URL -> POST file -> parse response.
-    """
+    if not DOODSTREAM_API_KEY:
+        return False, "DOODSTREAM_API_KEY belum diset"
     try:
         resp = requests.get(f"https://doodapi.com/api/upload/server?key={DOODSTREAM_API_KEY}", timeout=30)
         resp.raise_for_status()
@@ -151,13 +131,11 @@ def upload_doodstream_file(local_file):
         upload_url = js.get("result")
         if not upload_url:
             return False, f"No upload server: {js}"
-        # upload multipart
         with open(local_file, "rb") as f:
             files = {"file": f}
             r = requests.post(upload_url, data={"api_key": DOODSTREAM_API_KEY}, files=files, timeout=60*60)
             r.raise_for_status()
             jr = r.json()
-            # expected structure: {"status":200, "result": {"filecode": "..."}}
             if jr.get("status") in (200, "200") and "result" in jr:
                 filecode = jr["result"].get("filecode") or jr["result"].get("file_code") or jr["result"].get("fileid")
                 if filecode:
@@ -170,15 +148,6 @@ def upload_doodstream_file(local_file):
 
 # ============ WORKER ================
 def process_job(job):
-    """
-    job keys:
-      - chat_id
-      - link
-      - terabox_path (remote path, default '/')
-      - delete_after (bool)
-      - service ('terabox'|'doodstream')
-      - folder_name optional
-    """
     chat_id = job["chat_id"]
     link = job["link"]
     terabox_path = job.get("terabox_path", "/")
@@ -186,18 +155,15 @@ def process_job(job):
     service = job.get("service", user_state.get(chat_id, {}).get("service", "terabox"))
 
     send(chat_id, f"🔔 Job mulai: {link}\nService: {service}\nDest: {terabox_path}")
-    # prepare local folder
     is_folder = "/folder/" in link
     if is_folder:
         token = link.rstrip("/").split("/")[-1]
         folder_name = f"mega_folder_{token}"
     else:
-        # file -> use timestamp or provided folder_name
         folder_name = job.get("folder_name") or datetime.now().strftime("job_%Y%m%d_%H%M%S")
     local_dir = os.path.join(BASE_DOWNLOAD_DIR, folder_name)
     os.makedirs(local_dir, exist_ok=True)
 
-    # Download
     if DL_CMD is None:
         send(chat_id, "❌ Downloader Mega tidak ditemukan (megadl/mega-get/megatools).")
         return
@@ -211,21 +177,19 @@ def process_job(job):
     rc, out, err = run_cmd(dl_cmd, timeout=60*60*6)
     if rc != 0:
         send(chat_id, f"❌ Download gagal (rc={rc}).\n{err[:800]}")
-        # cleanup empty dir if created
         try:
             if os.path.isdir(local_dir) and not os.listdir(local_dir):
                 os.rmdir(local_dir)
-        except: pass
+        except: 
+            pass
         return
     send(chat_id, "✅ Download selesai.")
 
-    # Rename media files if user set prefix
     try:
         rename_media_files_for_job(chat_id, local_dir)
     except Exception as e:
         print("[rename] error:", e)
 
-    # list items
     try:
         items = sorted(os.listdir(local_dir))
     except Exception as e:
@@ -235,9 +199,7 @@ def process_job(job):
         send(chat_id, "⚠ Hasil download kosong.")
         return
 
-    # Upload
     if service == "terabox":
-        # if folder (or more than 1 item) -> upload folder; else upload file
         if is_folder or len(items) > 1:
             send(chat_id, f"⬆ Upload folder ke Terabox: {terabox_path}")
             rc2, out2, err2 = upload_terabox_path(local_dir, terabox_path)
@@ -253,8 +215,7 @@ def process_job(job):
                 send(chat_id, f"❌ Upload file gagal (rc={rc2}).")
             else:
                 send(chat_id, f"✅ Upload file selesai.")
-    else:  # doodstream
-        # doodstream: upload files individually (folder uploads not supported here)
+    else:
         for fname in items:
             fpath = os.path.join(local_dir, fname)
             if os.path.isfile(fpath):
@@ -265,7 +226,6 @@ def process_job(job):
                 else:
                     send(chat_id, f"❌ Doodstream gagal: {res}")
 
-    # cleanup local if requested
     if delete_after:
         try:
             shutil.rmtree(local_dir, ignore_errors=True)
@@ -294,7 +254,6 @@ def worker_loop():
             current_job = None
         job_q.task_done()
 
-# start worker thread
 t = threading.Thread(target=worker_loop, daemon=True)
 t.start()
 
@@ -310,16 +269,12 @@ def cmd_help(m):
         "/start - Mulai\n"
         "/help - Bantuan\n"
         "/status - Lihat job & antrian\n"
-        "/cleanup list|all|<folder> - Kelola folder lokal\n"
-        "/set_delete on|off - Set default delete after upload\n"
-        "/setprefix <prefix> - Set prefix untuk rename foto/video\n"
+        "/cleanup list|all|<folder>\n"
+        "/set_delete on|off\n"
+        "/setprefix <prefix>\n"
         "/listfolders - Lihat folder di downloads\n"
-        "/service terabox|doodstream - Set default service upload\n\n"
-        "Contoh:\n"
-        "/setprefix TELEGRAM@missyhot22\n"
-        "https://mega.nz/folder/XXXXX#KEY\n"
+        "/service terabox|doodstream\n"
     )
-    # send as plain text to avoid markdown parsing issues
     send(m.chat.id, text)
 
 @bot.message_handler(commands=['status'])
@@ -358,7 +313,6 @@ def cmd_cleanup(m):
         os.makedirs(BASE_DOWNLOAD_DIR, exist_ok=True)
         send(chat_id, "🗑 Semua folder dihapus.")
         return
-    # else delete specific folder
     target = os.path.join(BASE_DOWNLOAD_DIR, param)
     if os.path.exists(target):
         shutil.rmtree(target, ignore_errors=True)
@@ -377,12 +331,12 @@ def cmd_set_delete(m):
     user_state.setdefault(chat_id, {})["delete_after"] = val
     send(chat_id, f"Delete after upload set to {val}")
 
-@bot.message_handler(commands=['setprefix', 'prefix'])
+@bot.message_handler(commands=['setprefix'])
 def cmd_setprefix(m):
     chat_id = m.chat.id
     parts = m.text.split(maxsplit=1)
     if len(parts) < 2:
-        send(chat_id, "Usage: /setprefix <prefix>\nExample: /setprefix TELEGRAM@missyhot22")
+        send(chat_id, "Usage: /setprefix <prefix>")
         return
     prefix = parts[1].strip()
     user_state.setdefault(chat_id, {})["prefix"] = prefix
@@ -411,12 +365,10 @@ def cmd_service(m):
     user_state.setdefault(chat_id, {})["service"] = svc
     send(chat_id, f"Service default set to: {svc}")
 
-# ========== Message handlers: media & mega links ==========
 @bot.message_handler(content_types=['photo','video'])
 def handle_media(message):
     chat_id = message.chat.id
     prefix = user_state.get(chat_id, {}).get("prefix")
-    # determine file_id and extension from file path
     if message.content_type == 'photo':
         file_id = message.photo[-1].file_id
     else:
@@ -426,7 +378,6 @@ def handle_media(message):
     except Exception as e:
         send(chat_id, f"Error getting file info: {e}")
         return
-    # extension from file path (may be empty). fallback to jpg/mp4
     ext = os.path.splitext(file_info.file_path)[1] or (".jpg" if message.content_type == 'photo' else ".mp4")
     try:
         data = bot.download_file(file_info.file_path)
@@ -437,16 +388,13 @@ def handle_media(message):
     folder_path = os.path.join(BASE_DOWNLOAD_DIR, str(chat_id))
     os.makedirs(folder_path, exist_ok=True)
 
-    # collect existing media files of same extension or any media for numbering:
     existing_media = sorted([f for f in os.listdir(folder_path) if is_media_file(f)])
     new_index = len(existing_media) + 1
 
-    # determine filename
     if prefix:
         safe_prefix = sanitize_filename(prefix)
         filename = f"{safe_prefix} {new_index:02d}{ext}"
     else:
-        # fallback name
         filename = f"file_{new_index:02d}{ext}"
 
     save_path = os.path.join(folder_path, filename)
@@ -462,7 +410,6 @@ def handle_mega_message(m):
     if not link:
         send(chat_id, "Link Mega tidak valid.")
         return
-    # build job
     user_cfg = user_state.get(chat_id, {})
     job = {
         "chat_id": chat_id,
@@ -477,10 +424,8 @@ def handle_mega_message(m):
 
 @bot.message_handler(func=lambda m: True, content_types=['text'])
 def handle_text_default(m):
-    # catch-all for other text messages
     send(m.chat.id, "Perintah/tidak dikenali. Gunakan /help.")
 
-# ============ MAIN ============
 if __name__ == "__main__":
     print("Bot started...")
     bot.polling(none_stop=True)
