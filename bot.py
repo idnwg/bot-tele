@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Final bot.py (AMAN)
+Final bot.py
 - Mega.nz -> Terabox / Doodstream
 - Prefix rename untuk semua foto/video (FORMAT: "<PREFIX> 01.ext")
 - Queue worker, per-user settings
 - Commands: /start, /help, /status, /cleanup, /set_delete, /setprefix, /listfolders, /service
-- API keys & connect key diambil dari environment variables
+- API keys diambil dari .env (aman)
 """
 
 import os
@@ -15,37 +15,37 @@ import subprocess
 import threading
 import queue
 import shutil
+import time
 from datetime import datetime
 
 import requests
 import telebot
 from shutil import which
+from dotenv import load_dotenv
 
 # ================== CONFIG ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # <-- ambil dari environment
+load_dotenv()  # load .env file
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 TERABOX_CONNECT_KEY = os.getenv("TERABOX_CONNECT_KEY")
 DOODSTREAM_API_KEY = os.getenv("DOODSTREAM_API_KEY")
 
-if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN tidak ditemukan! Set dulu environment variable: export BOT_TOKEN='...'")
-
-if not TERABOX_CONNECT_KEY:
-    print("⚠️ TERABOX_CONNECT_KEY belum diset, upload ke Terabox tidak akan jalan.")
-
-if not DOODSTREAM_API_KEY:
-    print("⚠️ DOODSTREAM_API_KEY belum diset, upload ke Doodstream tidak akan jalan.")
-
-BASE_DOWNLOAD_DIR = "downloads"
+BASE_DOWNLOAD_DIR = "downloads"   # local download root
 os.makedirs(BASE_DOWNLOAD_DIR, exist_ok=True)
 
+# downloader candidates
 DL_CANDIDATES = ["megadl", "mega-get", "megatools"]
+
+# default behaviour
 DELETE_AFTER_UPLOAD_DEFAULT = False
 
+# media extensions considered for renaming
 MEDIA_EXT = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
              ".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv")
 
+# =============== STATE ====================
 bot = telebot.TeleBot(BOT_TOKEN)
-user_state = {}   # { chat_id: {prefix, service, delete_after} }
+user_state = {}   # per-chat state
 job_q = queue.Queue()
 current_job = None
 state_lock = threading.Lock()
@@ -115,15 +115,11 @@ def rename_media_files_for_job(chat_id, local_dir):
 
 # ============ UPLOAD HELPERS ================
 def upload_terabox_path(local_path, remote_path):
-    if not TERABOX_CONNECT_KEY:
-        return 1, "", "TERABOX_CONNECT_KEY belum diset"
     cmd = f'teraboxcli --connect-key {shlex.quote(TERABOX_CONNECT_KEY)} upload {shlex.quote(local_path)} {shlex.quote(remote_path)}'
     rc, out, err = run_cmd(cmd, timeout=60*60*2)
     return rc, out, err
 
 def upload_doodstream_file(local_file):
-    if not DOODSTREAM_API_KEY:
-        return False, "DOODSTREAM_API_KEY belum diset"
     try:
         resp = requests.get(f"https://doodapi.com/api/upload/server?key={DOODSTREAM_API_KEY}", timeout=30)
         resp.raise_for_status()
@@ -146,7 +142,7 @@ def upload_doodstream_file(local_file):
     except Exception as e:
         return False, str(e)
 
-# ============ WORKER ================
+# ============ WORKER LOOP ================
 def process_job(job):
     chat_id = job["chat_id"]
     link = job["link"]
@@ -165,7 +161,7 @@ def process_job(job):
     os.makedirs(local_dir, exist_ok=True)
 
     if DL_CMD is None:
-        send(chat_id, "❌ Downloader Mega tidak ditemukan (megadl/mega-get/megatools).")
+        send(chat_id, "❌ Downloader Mega tidak ditemukan.")
         return
     if DL_CMD in ("megadl", "megatools"):
         dl_cmd = f'megadl "{link}" --path "{local_dir}"'
@@ -265,15 +261,18 @@ def cmd_start(m):
 @bot.message_handler(commands=['help'])
 def cmd_help(m):
     text = (
-        "📌 *Perintah*:\n"
+        "📌 Perintah:\n"
         "/start - Mulai\n"
         "/help - Bantuan\n"
         "/status - Lihat job & antrian\n"
-        "/cleanup list|all|<folder>\n"
-        "/set_delete on|off\n"
-        "/setprefix <prefix>\n"
+        "/cleanup list|all|<folder> - Kelola folder lokal\n"
+        "/set_delete on|off - Set default delete after upload\n"
+        "/setprefix <prefix> - Set prefix untuk rename foto/video\n"
         "/listfolders - Lihat folder di downloads\n"
-        "/service terabox|doodstream\n"
+        "/service terabox|doodstream - Set default service upload\n\n"
+        "Contoh:\n"
+        "/setprefix TELEGRAM@missyhot22\n"
+        "https://mega.nz/folder/XXXXX#KEY\n"
     )
     send(m.chat.id, text)
 
@@ -331,12 +330,12 @@ def cmd_set_delete(m):
     user_state.setdefault(chat_id, {})["delete_after"] = val
     send(chat_id, f"Delete after upload set to {val}")
 
-@bot.message_handler(commands=['setprefix'])
+@bot.message_handler(commands=['setprefix', 'prefix'])
 def cmd_setprefix(m):
     chat_id = m.chat.id
     parts = m.text.split(maxsplit=1)
     if len(parts) < 2:
-        send(chat_id, "Usage: /setprefix <prefix>")
+        send(chat_id, "Usage: /setprefix <prefix>\nExample: /setprefix TELEGRAM@missyhot22")
         return
     prefix = parts[1].strip()
     user_state.setdefault(chat_id, {})["prefix"] = prefix
@@ -387,7 +386,6 @@ def handle_media(message):
 
     folder_path = os.path.join(BASE_DOWNLOAD_DIR, str(chat_id))
     os.makedirs(folder_path, exist_ok=True)
-
     existing_media = sorted([f for f in os.listdir(folder_path) if is_media_file(f)])
     new_index = len(existing_media) + 1
 
@@ -426,6 +424,7 @@ def handle_mega_message(m):
 def handle_text_default(m):
     send(m.chat.id, "Perintah/tidak dikenali. Gunakan /help.")
 
+# ============ MAIN ============
 if __name__ == "__main__":
     print("Bot started...")
     bot.polling(none_stop=True)
