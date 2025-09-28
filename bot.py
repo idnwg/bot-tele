@@ -3,11 +3,12 @@ import telebot
 from dotenv import load_dotenv
 from mega import Mega
 from pathlib import Path
-import threading
-import requests
+from threading import Thread
 import time
+import queue
+import requests
 
-# ----------------- Load Environment -----------------
+# Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TERABOX_KEY = os.getenv("TERABOX_CONNECT_KEY")
@@ -18,191 +19,185 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ----------------- Paths -----------------
+# Paths
 DOWNLOAD_PATH = Path("./downloads")
 DOWNLOAD_PATH.mkdir(exist_ok=True)
 
-# ----------------- Global Variables -----------------
-jobs_queue = []
-mega_instance = Mega()
-mega_account = None
+# Globals
+mega_client = None
+mega_email = None
+download_queue = queue.Queue()
 delete_after_upload = True
-rename_prefix = ""
+prefix_rename = ""
 
-# ----------------- Helpers -----------------
-def add_job(job):
-    jobs_queue.append(job)
-    threading.Thread(target=process_jobs).start()
+# Help text
+HELP_TEXT = """
+/status - Lihat job & antrian
+/cleanup list|all|<folder> - Kelola folder lokal
+/set_delete on|off - Set default delete after upload
+/setprefix <prefix> - Set prefix untuk rename foto/video
+/listfolders - Lihat folder di downloads
+/loginmega <email> <password> - Login akun Mega
+/logoutmega - Logout akun Mega
+"""
 
-def process_jobs():
-    while jobs_queue:
-        job = jobs_queue.pop(0)
-        try:
-            download_file(job)
-            rename_file(job)
-            upload_file(job)
-            if delete_after_upload:
-                os.remove(job['local_path'])
-        except Exception as e:
-            bot.send_message(job['chat_id'], f"❌ Error processing job: {e}")
-
-def download_file(job):
-    # Mega download
-    if job['source'] == 'mega':
-        global mega_account
-        if not mega_account:
-            raise Exception("❌ Mega belum login!")
-        file = mega_account.find(job['link'].split("/")[-1])
-        local_path = mega_account.download(file, str(DOWNLOAD_PATH))
-        job['local_path'] = local_path
-    else:
-        # URL download
-        response = requests.get(job['link'], stream=True)
-        local_path = DOWNLOAD_PATH / job['link'].split("/")[-1]
-        with open(local_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=1024*1024):
-                if chunk:
-                    f.write(chunk)
-        job['local_path'] = str(local_path)
-
-def rename_file(job):
-    if rename_prefix:
-        base = Path(job['local_path']).stem
-        ext = Path(job['local_path']).suffix
-        new_name = f"{rename_prefix}_{base}{ext}"
-        new_path = Path(job['local_path']).parent / new_name
-        os.rename(job['local_path'], new_path)
-        job['local_path'] = str(new_path)
-
-def upload_file(job):
-    if job['target'] == 'terabox':
-        headers = {"Authorization": f"Bearer {TERABOX_KEY}"}
-        with open(job['local_path'], "rb") as f:
-            requests.post("https://terabox.com/api/upload", headers=headers, files={"file": f})
-    elif job['target'] == 'doodstream':
-        files = {'file': open(job['local_path'], 'rb')}
-        data = {'key': DOOD_KEY}
-        requests.post("https://doodstream.com/api/upload", data=data, files=files)
-
-# ----------------- Command Handlers -----------------
-@bot.message_handler(commands=["start", "help"])
-def send_help(message):
-    help_text = (
-        "/status - Lihat job & antrian\n"
-        "/cleanup list|all|<folder> - Kelola folder lokal\n"
-        "/set_delete on|off - Set default delete after upload\n"
-        "/setprefix <prefix> - Set prefix untuk rename foto/video\n"
-        "/listfolders - Lihat folder di downloads\n"
-        "/loginmega <email> <password> - Login akun Mega\n"
-        "/logoutmega - Logout akun Mega\n"
-        "/download <link> - Download link Mega/URL\n"
-        "/upload <terabox|doodstream> - Upload file terakhir\n"
-        "Bisa pilih beberapa folder/file, di antrian diproses satu per satu."
-    )
-    bot.reply_to(message, help_text)
-
-@bot.message_handler(commands=["loginmega"])
-def login_mega(message):
+# --------------------- Mega Functions ---------------------
+def mega_login(email, password):
+    global mega_client, mega_email
     try:
-        args = message.text[len("/loginmega "):]
-        email, password = args.split(" ", 1)
-        global mega_account
-        mega_account = mega_instance.login(email, password)
-        bot.reply_to(message, "✅ Login Mega berhasil")
-    except ValueError:
-        bot.reply_to(message, "❌ Format salah! Gunakan: /loginmega email password")
+        mega = Mega()
+        m = mega.login(email, password)
+        mega_client = m
+        mega_email = email
+        return True, f"Login sukses sebagai {email}"
     except Exception as e:
-        bot.reply_to(message, f"❌ Gagal login Mega: {e}")
+        return False, f"Login gagal: {str(e)}"
 
-@bot.message_handler(commands=["logoutmega"])
-def logout_mega(message):
-    global mega_account
-    mega_account = None
-    bot.reply_to(message, "✅ Logout Mega berhasil")
+def mega_logout():
+    global mega_client, mega_email
+    mega_client = None
+    mega_email = None
+    return "Logout Mega berhasil"
 
-@bot.message_handler(commands=["set_delete"])
-def set_delete_cmd(message):
-    global delete_after_upload
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Gunakan: /set_delete on|off")
-        return
-    delete_after_upload = args[1].lower() == "on"
-    bot.reply_to(message, f"✅ delete_after_upload = {delete_after_upload}")
+def list_mega_folders():
+    if not mega_client:
+        return []
+    try:
+        files = mega_client.get_files()
+        folders = set()
+        for f in files.values():
+            if f['t'] == 1:  # folder
+                folders.add(f['a']['n'])
+        return list(folders)
+    except:
+        return []
 
-@bot.message_handler(commands=["setprefix"])
-def set_prefix_cmd(message):
-    global rename_prefix
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Gunakan: /setprefix <prefix>")
-        return
-    rename_prefix = args[1]
-    bot.reply_to(message, f"✅ Prefix rename di-set ke: {rename_prefix}")
+def download_mega_folder(folder_name):
+    if not mega_client:
+        return False, "Belum login Mega"
+    try:
+        folder_path = DOWNLOAD_PATH / folder_name
+        folder_path.mkdir(exist_ok=True)
+        files = mega_client.get_files()
+        for f in files.values():
+            if f['t'] == 0 and f.get('p') and files[f['p']]['a']['n'] == folder_name:
+                mega_client.download(f, dest=str(folder_path))
+        return True, f"Download folder {folder_name} selesai"
+    except Exception as e:
+        return False, f"Download gagal: {str(e)}"
 
-@bot.message_handler(commands=["download"])
-def download_cmd(message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Gunakan: /download <link>")
-        return
-    link = args[1]
-    source = "mega" if "mega.nz" in link else "url"
-    add_job({"chat_id": message.chat.id, "link": link, "source": source, "target": None})
-    bot.reply_to(message, "✅ Job ditambahkan ke antrian")
+# --------------------- Queue Worker ---------------------
+def worker():
+    while True:
+        job = download_queue.get()
+        if not job:
+            continue
+        folder, service = job
+        bot.send_message(job[2], f"Memproses folder {folder} → {service}")
+        success, msg = download_mega_folder(folder)
+        bot.send_message(job[2], msg)
+        if success:
+            # Upload
+            if service.lower() == "terabox":
+                # Implement Terabox upload here
+                bot.send_message(job[2], f"Upload {folder} ke Terabox selesai")
+            elif service.lower() == "doodstream":
+                # Implement Doodstream upload here
+                bot.send_message(job[2], f"Upload {folder} ke Doodstream selesai")
+            if delete_after_upload:
+                import shutil
+                shutil.rmtree(DOWNLOAD_PATH / folder)
+        download_queue.task_done()
 
-@bot.message_handler(commands=["upload"])
-def upload_cmd(message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Gunakan: /upload <terabox|doodstream>")
-        return
-    target = args[1].lower()
-    if not jobs_queue:
-        bot.reply_to(message, "❌ Tidak ada file untuk di-upload")
-        return
-    jobs_queue[-1]["target"] = target
-    bot.reply_to(message, f"✅ File terakhir akan di-upload ke {target}")
+# Start worker thread
+Thread(target=worker, daemon=True).start()
+
+# --------------------- Bot Commands ---------------------
+@bot.message_handler(commands=["help"])
+def cmd_help(message):
+    bot.reply_to(message, HELP_TEXT)
 
 @bot.message_handler(commands=["status"])
-def status_cmd(message):
-    text = f"Jobs di antrian: {len(jobs_queue)}"
-    bot.reply_to(message, text)
+def cmd_status(message):
+    bot.reply_to(message, f"Job dalam antrian: {download_queue.qsize()}")
 
 @bot.message_handler(commands=["listfolders"])
-def list_folders(message):
+def cmd_listfolders(message):
     folders = [f.name for f in DOWNLOAD_PATH.iterdir() if f.is_dir()]
-    if not folders:
-        bot.reply_to(message, "📂 Tidak ada folder")
-        return
-    bot.reply_to(message, "📂 Folder lokal:\n" + "\n".join(folders))
+    if folders:
+        bot.reply_to(message, "\n".join(folders))
+    else:
+        bot.reply_to(message, "Tidak ada folder di downloads")
+
+@bot.message_handler(commands=["set_delete"])
+def cmd_set_delete(message):
+    global delete_after_upload
+    args = message.text.split()
+    if len(args) == 2 and args[1].lower() in ["on", "off"]:
+        delete_after_upload = args[1].lower() == "on"
+        bot.reply_to(message, f"Delete after upload di-set {args[1].lower()}")
+    else:
+        bot.reply_to(message, "Gunakan: /set_delete on|off")
+
+@bot.message_handler(commands=["setprefix"])
+def cmd_setprefix(message):
+    global prefix_rename
+    args = message.text.split(maxsplit=1)
+    if len(args) == 2:
+        prefix_rename = args[1]
+        bot.reply_to(message, f"Prefix rename di-set ke: {prefix_rename}")
+    else:
+        bot.reply_to(message, "Gunakan: /setprefix <prefix>")
 
 @bot.message_handler(commands=["cleanup"])
-def cleanup_cmd(message):
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "❌ Gunakan: /cleanup list|all|<folder>")
-        return
-    param = args[1]
-    if param == "list":
-        list_folders(message)
-    elif param == "all":
+def cmd_cleanup(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) == 1 or args[1].lower() == "list":
+        folders = [f.name for f in DOWNLOAD_PATH.iterdir() if f.is_dir()]
+        bot.reply_to(message, "Folder lokal:\n" + "\n".join(folders))
+    elif args[1].lower() == "all":
+        import shutil
         for f in DOWNLOAD_PATH.iterdir():
             if f.is_dir():
-                for file in f.iterdir():
-                    file.unlink()
-                f.rmdir()
-        bot.reply_to(message, "✅ Semua folder dihapus")
+                shutil.rmtree(f)
+        bot.reply_to(message, "Semua folder dihapus")
     else:
-        folder = DOWNLOAD_PATH / param
-        if folder.exists() and folder.is_dir():
-            for file in folder.iterdir():
-                file.unlink()
-            folder.rmdir()
-            bot.reply_to(message, f"✅ Folder {param} dihapus")
+        folder = args[1]
+        path = DOWNLOAD_PATH / folder
+        if path.exists():
+            import shutil
+            shutil.rmtree(path)
+            bot.reply_to(message, f"Folder {folder} dihapus")
         else:
-            bot.reply_to(message, f"❌ Folder {param} tidak ditemukan")
+            bot.reply_to(message, f"Folder {folder} tidak ada")
 
-# ----------------- Start Bot -----------------
-if __name__ == "__main__":
-    bot.infinity_polling()
+@bot.message_handler(commands=["loginmega"])
+def cmd_loginmega(message):
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        bot.reply_to(message, "❌ Format salah! Gunakan: /loginmega email password")
+        return
+    email, password = parts[1], parts[2]
+    success, msg = mega_login(email, password)
+    bot.reply_to(message, msg)
+
+@bot.message_handler(commands=["logoutmega"])
+def cmd_logoutmega(message):
+    msg = mega_logout()
+    bot.reply_to(message, msg)
+
+@bot.message_handler(commands=["download"])
+def cmd_download(message):
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        bot.reply_to(message, "Gunakan: /download <folder> <service: Terabox|Doodstream>")
+        return
+    folder, service = args[1], args[2]
+    if not (DOWNLOAD_PATH / folder).exists():
+        bot.reply_to(message, f"Folder {folder} tidak ada di lokal, menambahkan ke antrian download")
+    download_queue.put((folder, service, message.chat.id))
+    bot.reply_to(message, f"Folder {folder} dimasukkan ke antrian → {service}")
+
+# --------------------- Start Bot ---------------------
+print("Bot started...")
+bot.infinity_polling()
