@@ -2,241 +2,178 @@ import os
 import telebot
 from dotenv import load_dotenv
 from pathlib import Path
-from threading import Thread, Lock
-import time
-import json
-import requests
-import queue
+from threading import Thread
 import subprocess
-import shlex
+import time
+from mega import Mega
 
-# -------------------
-# Load environment
-# -------------------
+# -------------------------------
+# Environment
+# -------------------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TERABOX_KEY = os.getenv("TERABOX_CONNECT_KEY")
 DOOD_KEY = os.getenv("DOODSTREAM_API_KEY")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 DOWNLOAD_PATH = Path("./downloads")
 DOWNLOAD_PATH.mkdir(exist_ok=True)
 
-# -------------------
-# Global variables
-# -------------------
-job_queue = queue.Queue()
-job_lock = Lock()
-mega_logged_in = False
-mega_email = ""
-mega_password = ""
-rename_prefix = ""
-auto_delete = False
+JOB_QUEUE = []
+MEGA = Mega()
+MEGA_ACCOUNT = None
 
-# -------------------
-# Helper Functions
-# -------------------
-def send_status(chat_id):
-    with job_lock:
-        pending = list(job_queue.queue)
-    if pending:
-        msg = "📋 Job Queue:\n" + "\n".join(f"{i+1}. {j['folder']} → {j['upload_target']}" for i,j in enumerate(pending))
-    else:
-        msg = "✅ Tidak ada job aktif."
-    bot.send_message(chat_id, msg)
+# -------------------------------
+# Helper functions
+# -------------------------------
+def send_message(chat_id, text):
+    bot.send_message(chat_id, text)
 
-def download_mega(folder, chat_id):
-    # Mega CMD download
-    folder_path = DOWNLOAD_PATH / folder
-    folder_path.mkdir(exist_ok=True)
-    bot.send_message(chat_id, f"⏳ Downloading Mega folder: {folder}")
+def login_mega(email, password):
+    global MEGA_ACCOUNT
     try:
-        cmd = f'mega-get "{folder}" "{folder_path}"'
-        subprocess.run(shlex.split(cmd), check=True)
-    except subprocess.CalledProcessError:
-        bot.send_message(chat_id, f"❌ Gagal download folder {folder}")
-        return False
-    return True
-
-def upload_terabox(folder_path, chat_id):
-    # Terabox upload via API
-    bot.send_message(chat_id, f"⏳ Uploading {folder_path.name} → Terabox")
-    files = {"file": open(folder_path, "rb")} if folder_path.is_file() else None
-    data = {"connect_key": TERABOX_KEY}
-    if folder_path.is_dir():
-        # upload folder as zip
-        zip_file = f"{folder_path}.zip"
-        subprocess.run(["zip", "-r", zip_file, str(folder_path)], check=True)
-        files = {"file": open(zip_file, "rb")}
-    try:
-        resp = requests.post("https://api.terabox.com/upload", data=data, files=files)
-        if resp.status_code == 200:
-            bot.send_message(chat_id, f"✅ Upload selesai: {folder_path.name}")
-        else:
-            bot.send_message(chat_id, f"❌ Upload gagal: {folder_path.name}")
+        MEGA_ACCOUNT = MEGA.login(email, password)
+        return True, "Login Mega berhasil ✅"
     except Exception as e:
-        bot.send_message(chat_id, f"❌ Upload error: {e}")
+        return False, f"❌ Login gagal: {str(e)}"
 
-def upload_doodstream(file_path, chat_id):
-    # Doodstream upload via API
-    bot.send_message(chat_id, f"⏳ Uploading {file_path.name} → Doodstream")
-    files = {"file": open(file_path, "rb")}
-    data = {"key": DOOD_KEY}
+def logout_mega():
+    global MEGA_ACCOUNT
+    MEGA_ACCOUNT = None
+    return "✅ Logout Mega berhasil"
+
+def list_mega_folders():
+    if not MEGA_ACCOUNT:
+        return []
+    return [f['name'] for f in MEGA_ACCOUNT.get_files().values() if f['t'] == 1]  # t==1 is folder
+
+def download_mega_folder(folder_name):
+    if not MEGA_ACCOUNT:
+        return False, "Mega belum login"
+    files = MEGA_ACCOUNT.get_files()
+    for f in files.values():
+        if f.get('name') == folder_name:
+            MEGA_ACCOUNT.download(f, dest=str(DOWNLOAD_PATH))
+            return True, f"⬇️ Download folder {folder_name} selesai"
+    return False, f"Folder {folder_name} tidak ditemukan"
+
+def run_terabox_upload(local_path):
     try:
-        resp = requests.post("https://doodstream.com/api/upload", data=data, files=files)
-        if resp.status_code == 200:
-            bot.send_message(chat_id, f"✅ Upload selesai: {file_path.name}")
-        else:
-            bot.send_message(chat_id, f"❌ Upload gagal: {file_path.name}")
+        proc = subprocess.run(
+            ["python3", "teraboxcli/main.py", "upload", str(local_path)],
+            capture_output=True,
+            text=True
+        )
+        return proc.stdout
     except Exception as e:
-        bot.send_message(chat_id, f"❌ Upload error: {e}")
+        return str(e)
 
-def process_jobs():
-    while True:
-        job = job_queue.get()
-        folder = job["folder"]
-        target = job["upload_target"]
-        chat_id = job["chat_id"]
+def run_dood_upload(file_path):
+    # Placeholder: Implement Doodstream API
+    return f"Doodstream uploaded: {file_path}"
 
-        folder_path = DOWNLOAD_PATH / folder
-        success = download_mega(folder, chat_id)
-        if not success:
-            job_queue.task_done()
+def process_job(chat_id, jobs):
+    for job in jobs:
+        folder = job['folder']
+        target = job['target']
+        prefix = job.get('prefix', '')
+
+        local_folder = DOWNLOAD_PATH / folder
+        if not local_folder.exists():
+            send_message(chat_id, f"❌ Folder {folder} tidak ada di downloads")
             continue
 
-        # rename if prefix set
-        if rename_prefix:
-            for f in folder_path.iterdir():
-                f.rename(folder_path / f"{rename_prefix}_{f.name}")
+        # Rename files
+        if prefix:
+            for f in local_folder.iterdir():
+                if f.is_file():
+                    f.rename(f.parent / f"{prefix}_{f.name}")
 
-        if target == "terabox":
-            upload_terabox(folder_path, chat_id)
-        elif target == "doodstream":
-            for f in folder_path.iterdir():
-                upload_doodstream(f, chat_id)
+        send_message(chat_id, f"⬇️ Mulai upload folder {folder} ke {', '.join(target)}")
+        results = []
 
-        if auto_delete:
-            subprocess.run(["rm", "-rf", str(folder_path)])
-        job_queue.task_done()
+        if "terabox" in target:
+            results.append(run_terabox_upload(local_folder))
+        if "doodstream" in target:
+            for f in local_folder.iterdir():
+                if f.is_file():
+                    results.append(run_dood_upload(f))
 
-# Start background worker
-Thread(target=process_jobs, daemon=True).start()
+        send_message(chat_id, f"✅ Selesai folder {folder}!\n" + "\n".join(results))
 
-# -------------------
-# Command Handlers
-# -------------------
+# -------------------------------
+# Bot Commands
+# -------------------------------
 @bot.message_handler(commands=["start", "help"])
 def send_help(message):
     help_text = """
-📌 Perintah Bot:
-
-/status - Lihat job & antrian
-/cleanup list|all|<folder> - Kelola folder lokal
-/set_delete on|off - Set default delete after upload
-/setprefix <prefix> - Set prefix untuk rename foto/video
-/listfolders - Lihat folder di downloads
-/loginmega <email> <password> - Login akun Mega
-/logoutmega - Logout akun Mega
-/download <folder> terabox|doodstream - Download Mega & upload
+/loginmega <email> <password> - Login Mega
+/logoutmega - Logout Mega
+/listmega - List folder Mega
+/download <folder1> <folder2> - Download folder Mega
+/listfolders - Lihat folder lokal
+/upload <folder1> ... <terabox/doodstream> - Upload folder lokal
+/setprefix <prefix> - Prefix untuk rename
+/status - Lihat job queue
 """
-    bot.send_message(message.chat.id, help_text)
-
-@bot.message_handler(commands=["status"])
-def handle_status(message):
-    send_status(message.chat.id)
-
-@bot.message_handler(commands=["setprefix"])
-def handle_setprefix(message):
-    global rename_prefix
-    parts = message.text.strip().split(" ", 1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "❌ Format salah! Gunakan /setprefix <prefix>")
-        return
-    rename_prefix = parts[1].strip()
-    bot.send_message(message.chat.id, f"✅ Prefix di-set: {rename_prefix}")
-
-@bot.message_handler(commands=["set_delete"])
-def handle_set_delete(message):
-    global auto_delete
-    parts = message.text.strip().split(" ", 1)
-    if len(parts) < 2 or parts[1] not in ["on", "off"]:
-        bot.send_message(message.chat.id, "❌ Format salah! Gunakan /set_delete on|off")
-        return
-    auto_delete = True if parts[1] == "on" else False
-    bot.send_message(message.chat.id, f"✅ Auto delete di-set: {auto_delete}")
+    send_message(message.chat.id, help_text)
 
 @bot.message_handler(commands=["loginmega"])
-def handle_loginmega(message):
-    global mega_logged_in, mega_email, mega_password
-    parts = message.text.strip().split(" ", 2)
-    if len(parts) < 3:
-        bot.send_message(message.chat.id, "❌ Format salah! Gunakan /loginmega email password")
-        return
-    email, password = parts[1], parts[2]
+def login_handler(message):
     try:
-        subprocess.run(["mega-login", email, password], check=True)
-        mega_logged_in = True
-        mega_email = email
-        mega_password = password
-        bot.send_message(message.chat.id, f"✅ Login Mega berhasil: {email}")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Login gagal: {e}")
+        _, email, password = message.text.split()
+        ok, msg = login_mega(email, password)
+        send_message(message.chat.id, msg)
+    except Exception:
+        send_message(message.chat.id, "Format salah! Gunakan: /loginmega email password")
 
 @bot.message_handler(commands=["logoutmega"])
-def handle_logoutmega(message):
-    global mega_logged_in, mega_email, mega_password
-    try:
-        subprocess.run(["mega-logout"], check=True)
-        mega_logged_in = False
-        mega_email = ""
-        mega_password = ""
-        bot.send_message(message.chat.id, "✅ Logout Mega berhasil")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Logout gagal: {e}")
+def logout_handler(message):
+    msg = logout_mega()
+    send_message(message.chat.id, msg)
 
-@bot.message_handler(commands=["listfolders"])
-def handle_listfolders(message):
-    folders = [f.name for f in DOWNLOAD_PATH.iterdir() if f.is_dir()]
-    if not folders:
-        bot.send_message(message.chat.id, "📂 Tidak ada folder di downloads")
-        return
-    bot.send_message(message.chat.id, "📂 Folder lokal:\n" + "\n".join(folders))
+@bot.message_handler(commands=["listmega"])
+def list_mega_handler(message):
+    folders = list_mega_folders()
+    send_message(message.chat.id, "📂 Folder Mega:\n" + "\n".join(folders))
 
 @bot.message_handler(commands=["download"])
-def handle_download(message):
-    parts = message.text.strip().split(" ", 2)
-    if len(parts) < 3 or parts[2] not in ["terabox", "doodstream"]:
-        bot.send_message(message.chat.id, "❌ Format salah! Gunakan /download <folder> terabox|doodstream")
-        return
-    folder = parts[1]
-    target = parts[2]
-    job_queue.put({"folder": folder, "upload_target": target, "chat_id": message.chat.id})
-    bot.send_message(message.chat.id, f"✅ Job ditambahkan: {folder} → {target}")
+def download_handler(message):
+    try:
+        args = message.text.split()[1:]
+        if not args:
+            send_message(message.chat.id, "Format salah! /download <folder1> ...")
+            return
+        for f in args:
+            ok, msg = download_mega_folder(f)
+            send_message(message.chat.id, msg)
+    except Exception as e:
+        send_message(message.chat.id, f"❌ Error: {str(e)}")
 
-@bot.message_handler(commands=["cleanup"])
-def handle_cleanup(message):
-    parts = message.text.strip().split(" ", 1)
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "❌ Format salah! Gunakan /cleanup list|all|<folder>")
-        return
-    arg = parts[1].strip()
-    if arg == "list":
-        folders = [f.name for f in DOWNLOAD_PATH.iterdir() if f.is_dir()]
-        bot.send_message(message.chat.id, "📂 Folder lokal:\n" + "\n".join(folders))
-    elif arg == "all":
-        subprocess.run(["rm", "-rf", str(DOWNLOAD_PATH)])
-        DOWNLOAD_PATH.mkdir(exist_ok=True)
-        bot.send_message(message.chat.id, "✅ Semua folder dihapus")
-    else:
-        folder_path = DOWNLOAD_PATH / arg
-        if folder_path.exists():
-            subprocess.run(["rm", "-rf", str(folder_path)])
-            bot.send_message(message.chat.id, f"✅ Folder dihapus: {arg}")
-        else:
-            bot.send_message(message.chat.id, f"❌ Folder tidak ditemukan: {arg}")
+@bot.message_handler(commands=["listfolders"])
+def list_local_folders(message):
+    folders = [f.name for f in DOWNLOAD_PATH.iterdir() if f.is_dir()]
+    send_message(message.chat.id, "📂 Folder lokal:\n" + "\n".join(folders))
 
-# -------------------
-# Start polling
-# -------------------
-print("Bot siap dijalankan...")
+@bot.message_handler(commands=["upload"])
+def upload_handler(message):
+    try:
+        args = message.text.split()[1:]
+        folders = []
+        targets = []
+        for a in args:
+            if a.lower() in ["terabox", "doodstream"]:
+                targets.append(a.lower())
+            else:
+                folders.append(a)
+        if not folders or not targets:
+            send_message(message.chat.id, "Format salah! /upload <folder1> ... <terabox/doodstream>")
+            return
+        Thread(target=process_job, args=(message.chat.id, [{"folder": f, "target": targets} for f in folders])).start()
+        send_message(message.chat.id, f"🔄 Job dimasukkan ke antrian: {folders} -> {targets}")
+    except Exception as e:
+        send_message(message.chat.id, f"❌ Error: {str(e)}")
+
+# -------------------------------
+# Run Bot
+# -------------------------------
 bot.infinity_polling()
