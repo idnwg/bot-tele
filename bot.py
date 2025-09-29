@@ -9,7 +9,7 @@ import json
 import time
 import shutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from pathlib import Path
 from queue import Queue
 from dotenv import load_dotenv
@@ -139,21 +139,37 @@ async def cleanup_after_upload(folder_path, update: Update, context: ContextType
         return False
 
 async def cleanup_old_downloads():
-    """Bersihkan folder download yang sudah lama"""
+    """Bersihkan folder download yang sudah lama - FIXED VERSION"""
     try:
         current_time = time.time()
         cleanup_threshold = 24 * 3600  # 24 jam
         
-        for folder_name in os.listdir(DOWNLOADS_DIR):
-            folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
-            if os.path.isdir(folder_path):
-                folder_time = os.path.getmtime(folder_path)
-                if current_time - folder_time > cleanup_threshold:
+        # Gunakan asyncio.to_thread untuk operasi blocking
+        def sync_cleanup():
+            folders_to_remove = []
+            for folder_name in os.listdir(DOWNLOADS_DIR):
+                folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
+                if os.path.isdir(folder_path):
+                    folder_time = os.path.getmtime(folder_path)
+                    if current_time - folder_time > cleanup_threshold:
+                        folders_to_remove.append(folder_path)
+            
+            for folder_path in folders_to_remove:
+                try:
                     shutil.rmtree(folder_path)
-                    logger.info(f"Cleaned up old folder: {folder_name}")
-                    
+                    logger.info(f"Cleaned up old folder: {os.path.basename(folder_path)}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up folder {folder_path}: {e}")
+            
+            return len(folders_to_remove)
+        
+        # Jalankan cleanup di thread terpisah
+        removed_count = await asyncio.get_event_loop().run_in_executor(None, sync_cleanup)
+        if removed_count > 0:
+            logger.info(f"Auto-cleanup completed: {removed_count} folders removed")
+        
     except Exception as e:
-        logger.error(f"Error cleaning up old downloads: {e}")
+        logger.error(f"Error in cleanup_old_downloads: {e}")
 
 # ========== HELPER FUNCTIONS ==========
 
@@ -290,35 +306,43 @@ async def auto_rename_media_files(folder_path, prefix, update: Update, context: 
     video_count = 0
     
     try:
-        for root, dirs, files in os.walk(folder_path):
-            # Process photos
-            photo_files = [f for f in files 
-                         if os.path.splitext(f)[1].lower() in PHOTO_EXTENSIONS]
-            for i, filename in enumerate(sorted(photo_files), 1):
-                old_path = os.path.join(root, filename)
-                ext = os.path.splitext(filename)[1]
-                new_name = f"{prefix}pic_{i:04d}{ext}"
-                new_path = os.path.join(root, new_name)
-                
-                if safe_rename(old_path, new_path):
-                    photo_count += 1
-            
-            # Process videos
-            video_files = [f for f in files 
-                         if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
-            for i, filename in enumerate(sorted(video_files), 1):
-                old_path = os.path.join(root, filename)
-                ext = os.path.splitext(filename)[1]
-                new_name = f"{prefix}vid_{i:04d}{ext}"
-                new_path = os.path.join(root, new_name)
-                
-                if safe_rename(old_path, new_path):
-                    video_count += 1
+        # Gunakan thread executor untuk operasi file yang blocking
+        def sync_rename():
+            nonlocal photo_count, video_count
+            for root, dirs, files in os.walk(folder_path):
+                # Process photos
+                photo_files = [f for f in files 
+                             if os.path.splitext(f)[1].lower() in PHOTO_EXTENSIONS]
+                for i, filename in enumerate(sorted(photo_files), 1):
+                    old_path = os.path.join(root, filename)
+                    ext = os.path.splitext(filename)[1]
+                    new_name = f"{prefix}pic_{i:04d}{ext}"
+                    new_path = os.path.join(root, new_name)
                     
+                    if safe_rename(old_path, new_path):
+                        photo_count += 1
+                
+                # Process videos
+                video_files = [f for f in files 
+                             if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
+                for i, filename in enumerate(sorted(video_files), 1):
+                    old_path = os.path.join(root, filename)
+                    ext = os.path.splitext(filename)[1]
+                    new_name = f"{prefix}vid_{i:04d}{ext}"
+                    new_path = os.path.join(root, new_name)
+                    
+                    if safe_rename(old_path, new_path):
+                        video_count += 1
+            return {'photos': photo_count, 'videos': video_count}
+        
+        # Jalankan rename di thread terpisah
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, sync_rename)
+        return result
+        
     except Exception as e:
         logger.error(f"Auto rename error: {e}")
-    
-    return {'photos': photo_count, 'videos': video_count}
+        return {'photos': 0, 'videos': 0}
 
 # ========== UPLOAD FUNCTIONS ==========
 
@@ -942,10 +966,21 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Job {job_id} tidak ditemukan")
 
+# ========== STARTUP TASKS ==========
+
+async def run_startup_tasks():
+    """Jalankan task saat startup"""
+    try:
+        logger.info("Running startup tasks...")
+        # Jalankan cleanup untuk folder lama
+        await cleanup_old_downloads()
+    except Exception as e:
+        logger.error(f"Error in startup tasks: {e}")
+
 # ========== MAIN FUNCTION ==========
 
 def main():
-    """Main function"""
+    """Main function - FIXED VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
@@ -973,8 +1008,11 @@ def main():
     application.add_handler(CallbackQueryHandler(upload_callback, pattern="^(page_|select_|target_|megadl_)"))
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
     
-    # Jalankan cleanup untuk folder lama
-    asyncio.create_task(cleanup_old_downloads())
+    # Jalankan startup tasks setelah bot berjalan
+    async def post_init(application):
+        asyncio.create_task(run_startup_tasks())
+    
+    application.post_init(post_init)
     
     # Jalankan bot
     logger.info("🤖 Bot started successfully with Mega-cmd integration and Auto-Cleanup")
