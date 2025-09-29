@@ -49,6 +49,83 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ========== MEGA-CMD CHECK & SETUP ==========
+
+def check_mega_cmd():
+    """Check jika mega-cmd terinstall dan tersedia"""
+    try:
+        # Coba beberapa kemungkinan path mega-cmd
+        possible_paths = [
+            '/usr/bin/mega-cmd',
+            '/usr/local/bin/mega-cmd', 
+            '/bin/mega-cmd',
+            '/snap/bin/mega-cmd',
+            '/usr/bin/mega-ls',
+            '/usr/local/bin/mega-ls',
+            '/bin/mega-ls'
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                logger.info(f"Mega-cmd found at: {path}")
+                return True
+        
+        # Coba dengan command which
+        result = subprocess.run(['which', 'mega-ls'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Mega-cmd found via which: {result.stdout.strip()}")
+            return True
+            
+        logger.error("Mega-cmd not found. Please install mega-cmd first.")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking mega-cmd: {e}")
+        return False
+
+def get_mega_cmd_path():
+    """Dapatkan path ke mega-cmd executable"""
+    try:
+        # Coba which mega-ls
+        result = subprocess.run(['which', 'mega-ls'], capture_output=True, text=True)
+        if result.returncode == 0:
+            return 'mega-ls'  # Gunakan dari PATH
+        
+        # Coba path umum
+        possible_paths = [
+            '/usr/bin/mega-ls',
+            '/usr/local/bin/mega-ls', 
+            '/bin/mega-ls',
+            '/snap/bin/mega-ls'
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+                
+        return None
+    except Exception as e:
+        logger.error(f"Error getting mega-cmd path: {e}")
+        return None
+
+def check_mega_login():
+    """Check jika sudah login ke Mega.nz"""
+    try:
+        mega_path = get_mega_cmd_path()
+        if not mega_path:
+            return False, "Mega-cmd not installed"
+            
+        result = subprocess.run([mega_path.replace('mega-ls', 'mega-whoami')], 
+                              capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        else:
+            return False, "Not logged in to Mega.nz"
+            
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
 # ========== USER SETTINGS MANAGEMENT ==========
 
 def load_user_settings():
@@ -210,11 +287,38 @@ def safe_rename(old_path, new_path):
 async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List semua folder di akun Mega menggunakan mega-cmd"""
     try:
+        # Check mega-cmd first
+        mega_path = get_mega_cmd_path()
+        if not mega_path:
+            await update.message.reply_text(
+                "❌ **Mega-cmd tidak ditemukan!**\n\n"
+                "Silakan install mega-cmd terlebih dahulu:\n"
+                "1. Download dari: https://mega.nz/cmd\n"
+                "2. Install di VPS\n"
+                "3. Login: `mega-login email password`\n"
+                "4. Coba lagi /listmega"
+            )
+            return
+        
+        # Check login status
+        is_logged_in, login_msg = check_mega_login()
+        if not is_logged_in:
+            await update.message.reply_text(
+                f"❌ **Belum login ke Mega.nz!**\n\n"
+                f"Error: {login_msg}\n\n"
+                "Silakan login dulu dengan perintah:\n"
+                "`mega-login email password`"
+            )
+            return
+        
         # Gunakan mega-cmd untuk list folder
-        result = subprocess.run(['mega-ls'], capture_output=True, text=True)
+        result = subprocess.run([mega_path], capture_output=True, text=True)
         
         if result.returncode != 0:
-            await update.message.reply_text("❌ Gagal mengambil daftar folder dari Mega.nz")
+            await update.message.reply_text(
+                "❌ Gagal mengambil daftar folder dari Mega.nz\n"
+                f"Error: {result.stderr}"
+            )
             logger.error(f"mega-ls failed: {result.stderr}")
             return
         
@@ -255,14 +359,21 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         chat_id = update.effective_chat.id
         user_settings = get_user_settings(chat_id)
         
+        # Check mega-cmd first
+        mega_path = get_mega_cmd_path()
+        if not mega_path:
+            await send_progress_message(chat_id, "❌ Mega-cmd tidak ditemukan! Silakan install terlebih dahulu.", context)
+            return
+        
         await send_progress_message(chat_id, f"📥 Memulai download folder: {folder_name}", context)
         
         # Download folder dari Mega menggunakan mega-get
         target_path = os.path.join(DOWNLOADS_DIR, folder_name)
         os.makedirs(target_path, exist_ok=True)
         
-        # Download folder recursive
-        cmd = ['mega-get', f'/{folder_name}', target_path]
+        # Download folder recursive - gunakan mega-get
+        mega_get_path = mega_path.replace('mega-ls', 'mega-get')
+        cmd = [mega_get_path, f'/{folder_name}', target_path]
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
@@ -664,8 +775,16 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /start"""
-    welcome_text = """
+    # Check mega-cmd status
+    mega_path = get_mega_cmd_path()
+    is_logged_in, login_msg = check_mega_login()
+    
+    mega_status = "✅ Terinstall & Login" if is_logged_in else "❌ Tidak terinstall/Login"
+    
+    welcome_text = f"""
 🤖 **Bot Download & Upload Manager**
+
+**Status Mega.nz:** {mega_status}
 
 **Fitur:**
 📥 Download folder dari Mega.nz
@@ -856,14 +975,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_count = len(active_jobs)
     
     # Check mega-cmd status
-    mega_status = "❌ Unknown"
-    try:
-        result = subprocess.run(['mega-whoami'], capture_output=True, text=True)
-        if result.returncode == 0:
-            mega_status = f"✅ {result.stdout.strip()}"
-        else:
-            mega_status = "❌ Not logged in"
-    except:
+    mega_path = get_mega_cmd_path()
+    is_logged_in, login_msg = check_mega_login()
+    
+    if mega_path and is_logged_in:
+        mega_status = f"✅ {login_msg}"
+    elif mega_path:
+        mega_status = "❌ Not logged in"
+    else:
         mega_status = "❌ mega-cmd not available"
     
     status_text = f"""
@@ -966,6 +1085,10 @@ def main():
     """Main function - FINAL STABLE VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    
+    # Check mega-cmd pada startup
+    if not check_mega_cmd():
+        logger.warning("Mega-cmd not found. Please install mega-cmd for Mega.nz functionality.")
     
     # Jalankan cleanup untuk folder lama (sync version)
     try:
