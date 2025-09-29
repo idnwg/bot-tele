@@ -138,35 +138,29 @@ async def cleanup_after_upload(folder_path, update: Update, context: ContextType
         logger.error(f"Cleanup error: {e}")
         return False
 
-async def cleanup_old_downloads():
-    """Bersihkan folder download yang sudah lama - FIXED VERSION"""
+def cleanup_old_downloads():
+    """Bersihkan folder download yang sudah lama - SYNC VERSION"""
     try:
         current_time = time.time()
         cleanup_threshold = 24 * 3600  # 24 jam
         
-        # Gunakan asyncio.to_thread untuk operasi blocking
-        def sync_cleanup():
-            folders_to_remove = []
-            for folder_name in os.listdir(DOWNLOADS_DIR):
-                folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
-                if os.path.isdir(folder_path):
-                    folder_time = os.path.getmtime(folder_path)
-                    if current_time - folder_time > cleanup_threshold:
-                        folders_to_remove.append(folder_path)
-            
-            for folder_path in folders_to_remove:
-                try:
-                    shutil.rmtree(folder_path)
-                    logger.info(f"Cleaned up old folder: {os.path.basename(folder_path)}")
-                except Exception as e:
-                    logger.error(f"Error cleaning up folder {folder_path}: {e}")
-            
-            return len(folders_to_remove)
+        folders_to_remove = []
+        for folder_name in os.listdir(DOWNLOADS_DIR):
+            folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
+            if os.path.isdir(folder_path):
+                folder_time = os.path.getmtime(folder_path)
+                if current_time - folder_time > cleanup_threshold:
+                    folders_to_remove.append(folder_path)
         
-        # Jalankan cleanup di thread terpisah
-        removed_count = await asyncio.get_event_loop().run_in_executor(None, sync_cleanup)
-        if removed_count > 0:
-            logger.info(f"Auto-cleanup completed: {removed_count} folders removed")
+        for folder_path in folders_to_remove:
+            try:
+                shutil.rmtree(folder_path)
+                logger.info(f"Cleaned up old folder: {os.path.basename(folder_path)}")
+            except Exception as e:
+                logger.error(f"Error cleaning up folder {folder_path}: {e}")
+        
+        if folders_to_remove:
+            logger.info(f"Auto-cleanup completed: {len(folders_to_remove)} folders removed")
         
     except Exception as e:
         logger.error(f"Error in cleanup_old_downloads: {e}")
@@ -966,23 +960,18 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ Job {job_id} tidak ditemukan")
 
-# ========== STARTUP TASKS ==========
-
-async def run_startup_tasks():
-    """Jalankan task saat startup"""
-    try:
-        logger.info("Running startup tasks...")
-        # Jalankan cleanup untuk folder lama
-        await cleanup_old_downloads()
-    except Exception as e:
-        logger.error(f"Error in startup tasks: {e}")
-
 # ========== MAIN FUNCTION ==========
 
 def main():
-    """Main function - FIXED VERSION"""
+    """Main function - FINAL STABLE VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    
+    # Jalankan cleanup untuk folder lama (sync version)
+    try:
+        cleanup_old_downloads()
+    except Exception as e:
+        logger.error(f"Error during startup cleanup: {e}")
     
     # Buat aplikasi bot
     application = Application.builder().token(BOT_TOKEN).build()
@@ -1007,12 +996,6 @@ def main():
     # Callback handlers
     application.add_handler(CallbackQueryHandler(upload_callback, pattern="^(page_|select_|target_|megadl_)"))
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
-    
-    # Jalankan startup tasks setelah bot berjalan
-    async def post_init(application):
-        asyncio.create_task(run_startup_tasks())
-    
-    application.post_init(post_init)
     
     # Jalankan bot
     logger.info("🤖 Bot started successfully with Mega-cmd integration and Auto-Cleanup")
