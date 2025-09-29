@@ -6,11 +6,11 @@ import requests
 import subprocess
 import re
 import json
+import time
+import shutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from mega import Mega
 from pathlib import Path
-import threading
 from queue import Queue
 from dotenv import load_dotenv
 
@@ -21,17 +21,13 @@ load_dotenv(os.path.join('/root/bot-tele', '.env'))
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 TERABOX_CONNECT_KEY = os.getenv('TERABOX_CONNECT_KEY')
 DOODSTREAM_API_KEY = os.getenv('DOODSTREAM_API_KEY')
+AUTO_CLEANUP = os.getenv('AUTO_CLEANUP', 'true').lower() == 'true'
 
 BASE_DIR = "/root/bot-tele"
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 TERABOX_CLI = os.path.join(BASE_DIR, "teraboxcli", "main.py")
 TERABOX_SETTINGS = os.path.join(BASE_DIR, "teraboxcli", "settings.json")
 USER_SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
-
-# Inisialisasi Mega
-mega = Mega()
-mega_client = None
-current_user = None
 
 # Antrian jobs
 download_queue = Queue()
@@ -81,8 +77,9 @@ def get_user_settings(user_id):
         # Default settings
         settings[str(user_id)] = {
             'prefix': 'file_',
-            'platform': 'terabox',  # default platform
-            'auto_upload': False
+            'platform': 'terabox',
+            'auto_upload': False,
+            'auto_cleanup': True
         }
         save_user_settings(settings)
     return settings[str(user_id)]
@@ -101,10 +98,9 @@ def update_terabox_settings(local_folder, remote_folder):
         with open(TERABOX_SETTINGS, 'r') as f:
             settings = json.load(f)
         
-        # Update source directory ke folder yang akan diupload
         settings['directories']['sourcedir'] = local_folder
         settings['directories']['remotedir'] = remote_folder
-        settings['files']['deletesource'] = "false"  # Jangan hapus file source
+        settings['files']['deletesource'] = "false"
         
         with open(TERABOX_SETTINGS, 'w') as f:
             json.dump(settings, f, indent=2)
@@ -114,6 +110,50 @@ def update_terabox_settings(local_folder, remote_folder):
     except Exception as e:
         logger.error(f"Error updating Terabox settings: {e}")
         return False
+
+# ========== CLEANUP FUNCTIONS ==========
+
+async def cleanup_after_upload(folder_path, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hapus folder setelah upload selesai"""
+    try:
+        chat_id = update.effective_chat.id
+        
+        if not folder_path.startswith(DOWNLOADS_DIR):
+            logger.error(f"Invalid folder path for cleanup: {folder_path}")
+            return False
+            
+        if os.path.exists(folder_path):
+            folder_name = os.path.basename(folder_path)
+            shutil.rmtree(folder_path)
+            await send_progress_message(chat_id, f"🧹 Folder berhasil dihapus: {folder_name}", context)
+            logger.info(f"Cleanup completed: {folder_path}")
+            return True
+        else:
+            logger.warning(f"Folder tidak ditemukan untuk cleanup: {folder_path}")
+            return False
+            
+    except Exception as e:
+        error_msg = f"❌ Gagal menghapus folder: {str(e)}"
+        await send_progress_message(update.effective_chat.id, error_msg, context)
+        logger.error(f"Cleanup error: {e}")
+        return False
+
+async def cleanup_old_downloads():
+    """Bersihkan folder download yang sudah lama"""
+    try:
+        current_time = time.time()
+        cleanup_threshold = 24 * 3600  # 24 jam
+        
+        for folder_name in os.listdir(DOWNLOADS_DIR):
+            folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
+            if os.path.isdir(folder_path):
+                folder_time = os.path.getmtime(folder_path)
+                if current_time - folder_time > cleanup_threshold:
+                    shutil.rmtree(folder_path)
+                    logger.info(f"Cleaned up old folder: {folder_name}")
+                    
+    except Exception as e:
+        logger.error(f"Error cleaning up old downloads: {e}")
 
 # ========== HELPER FUNCTIONS ==========
 
@@ -157,39 +197,28 @@ def safe_rename(old_path, new_path):
 
 # ========== MEGA.NZ FUNCTIONS ==========
 
-def init_mega_client():
-    """Initialize Mega client dari session yang sudah login di VPS"""
-    global mega_client
-    try:
-        # Coba login dengan session yang sudah ada
-        mega_client = mega.login()
-        if mega_client:
-            logger.info("Mega client initialized successfully from existing session")
-        else:
-            logger.warning("No existing Mega session found")
-    except Exception as e:
-        logger.error(f"Failed to initialize Mega client: {e}")
-
 async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List semua folder di akun Mega"""
-    global mega_client
-    
-    if not mega_client:
-        init_mega_client()
-        
-    if not mega_client:
-        await update.message.reply_text("❌ Tidak dapat terhubung ke Mega.nz. Pastikan sudah login di VPS.")
-        return
-    
+    """List semua folder di akun Mega menggunakan mega-cmd"""
     try:
-        # Dapatkan files dari Mega
-        files = mega_client.get_files()
+        # Gunakan mega-cmd untuk list folder
+        result = subprocess.run(['mega-ls'], capture_output=True, text=True)
         
-        # Filter hanya folder
+        if result.returncode != 0:
+            await update.message.reply_text("❌ Gagal mengambil daftar folder dari Mega.nz")
+            logger.error(f"mega-ls failed: {result.stderr}")
+            return
+        
+        lines = result.stdout.strip().split('\n')
         folders = []
-        for file_id, file_data in files.items():
-            if file_data['t'] == 0:  # t=0 adalah folder
-                folders.append(file_data['a']['n'])
+        
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('[') and not line.startswith('Used') and not line.startswith('Total'):
+                # Filter hanya folder (tidak ada ekstensi file)
+                if '.' not in line or any(line.endswith(ext) for ext in ['.txt', '.zip', '.rar']):
+                    # Skip file, hanya ambil folder
+                    if '/' not in line and '\\' not in line:
+                        folders.append(line)
         
         if not folders:
             await update.message.reply_text("📭 Tidak ada folder di akun Mega.nz")
@@ -211,37 +240,23 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"List mega folders error: {e}")
 
 async def download_mega_folder(folder_name, job_id, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download folder dari Mega.nz"""
+    """Download folder dari Mega.nz menggunakan mega-cmd"""
     try:
-        if not mega_client:
-            init_mega_client()
-            
-        if not mega_client:
-            await update.message.reply_text("❌ Mega client tidak tersedia")
-            return
-
         chat_id = update.effective_chat.id
         user_settings = get_user_settings(chat_id)
         
         await send_progress_message(chat_id, f"📥 Memulai download folder: {folder_name}", context)
         
-        # Download folder dari Mega
+        # Download folder dari Mega menggunakan mega-get
         target_path = os.path.join(DOWNLOADS_DIR, folder_name)
         os.makedirs(target_path, exist_ok=True)
         
-        # Cari folder ID berdasarkan nama
-        files = mega_client.get_files()
-        folder_id = None
-        for file_id, file_data in files.items():
-            if file_data['t'] == 0 and file_data['a']['n'] == folder_name:  # Folder dengan nama yang cocok
-                folder_id = file_id
-                break
-        
-        if not folder_id:
-            raise Exception(f"Folder '{folder_name}' tidak ditemukan di Mega.nz")
-        
         # Download folder recursive
-        mega_client.download_folder(folder_id, target_path)
+        cmd = ['mega-get', f'/{folder_name}', target_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            raise Exception(f"Download gagal: {result.stderr}")
         
         await send_progress_message(chat_id, f"✅ Download selesai: {folder_name}", context)
         
@@ -378,48 +393,23 @@ async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.D
         message += f"📊 Hasil: {success_count} sukses, {failed_count} gagal\n"
         
         if uploaded_links:
-            # Tampilkan beberapa link contoh
             message += f"\n📎 Contoh links ({min(3, len(uploaded_links))} dari {len(uploaded_links)}):\n"
             for link in uploaded_links[:3]:
                 message += f"🔗 {link}\n"
         
         await send_progress_message(chat_id, message, context)
         logger.info(f"Terabox upload completed: {success_count}/{total_files} files")
+        
+        # AUTO CLEANUP setelah upload selesai
+        user_settings = get_user_settings(chat_id)
+        if success_count > 0 and (user_settings.get('auto_cleanup', True) or AUTO_CLEANUP):
+            await send_progress_message(chat_id, "🧹 Membersihkan folder lokal...", context)
+            await cleanup_after_upload(folder_path, update, context)
             
     except Exception as e:
         error_msg = f"❌ Error upload Terabox: {str(e)}"
         await send_progress_message(update.effective_chat.id, error_msg, context)
         logger.error(f"Terabox upload error: {e}")
-
-def extract_terabox_link(output):
-    """Extract link dari output TeraboxUploaderCLI"""
-    try:
-        # Cari pola URL Terabox dalam output
-        patterns = [
-            r'https?://[^\s]*terabox[^\s]*',
-            r'https?://[^\s]*1024tera[^\s]*',
-            r'Link: (https?://[^\s]+)',
-            r'URL: (https?://[^\s]+)'
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, output)
-            if matches:
-                return matches[0]
-        
-        # Jika tidak ditemukan dengan pola di atas, cari baris yang mengandung "http"
-        lines = output.split('\n')
-        for line in lines:
-            if 'http' in line and '://' in line:
-                # Extract URL dari baris
-                url_match = re.search(r'(https?://[^\s]+)', line)
-                if url_match:
-                    return url_match.group(1)
-        
-        return None
-    except Exception as e:
-        logger.error(f"Error extracting Terabox link: {e}")
-        return None
 
 async def upload_to_doodstream(folder_path, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Upload ke Doodstream via API - File video saja"""
@@ -444,6 +434,7 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
         await send_progress_message(chat_id, f"📤 Mengupload {total_files} video ke Doodstream...", context)
         
         uploaded_links = []
+        success_count = 0
         
         for i, file_path in enumerate(video_files, 1):
             try:
@@ -456,6 +447,7 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
                 result = await upload_single_file_to_doodstream(file_path)
                 if result:
                     uploaded_links.append(result)
+                    success_count += 1
                     logger.info(f"Doodstream upload successful: {result}")
                 else:
                     logger.error(f"Doodstream upload failed for: {file_path}")
@@ -466,7 +458,7 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
         if uploaded_links:
             message = f"✅ Upload Doodstream selesai!\n"
             message += f"📁 Folder: {folder_name}\n"
-            message += f"📹 Video: {len(uploaded_links)} berhasil\n"
+            message += f"📹 Video: {success_count} berhasil\n"
             message += f"\n📎 Links ({min(3, len(uploaded_links))} dari {len(uploaded_links)}):\n"
             for link in uploaded_links[:3]:
                 message += f"🔗 {link}\n"
@@ -474,6 +466,12 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
             await send_progress_message(chat_id, message, context)
         else:
             await send_progress_message(chat_id, "❌ Tidak ada video yang berhasil diupload ke Doodstream", context)
+        
+        # AUTO CLEANUP setelah upload selesai
+        user_settings = get_user_settings(chat_id)
+        if success_count > 0 and (user_settings.get('auto_cleanup', True) or AUTO_CLEANUP):
+            await send_progress_message(chat_id, "🧹 Membersihkan folder lokal...", context)
+            await cleanup_after_upload(folder_path, update, context)
             
     except Exception as e:
         error_msg = f"❌ Error upload Doodstream: {str(e)}"
@@ -483,6 +481,9 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
 async def upload_single_file_to_doodstream(file_path):
     """Upload single file ke Doodstream"""
     try:
+        if not DOODSTREAM_API_KEY:
+            raise Exception("Doodstream API key tidak ditemukan")
+        
         # Dapatkan server upload
         server_resp = requests.get(f"https://doodapi.com/api/upload/server?key={DOODSTREAM_API_KEY}")
         server_data = server_resp.json()
@@ -510,6 +511,33 @@ async def upload_single_file_to_doodstream(file_path):
         logger.error(f"Doodstream single file upload error: {e}")
         return None
 
+def extract_terabox_link(output):
+    """Extract link dari output TeraboxUploaderCLI"""
+    try:
+        patterns = [
+            r'https?://[^\s]*terabox[^\s]*',
+            r'https?://[^\s]*1024tera[^\s]*',
+            r'Link: (https?://[^\s]+)',
+            r'URL: (https?://[^\s]+)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, output)
+            if matches:
+                return matches[0]
+        
+        lines = output.split('\n')
+        for line in lines:
+            if 'http' in line and '://' in line:
+                url_match = re.search(r'(https?://[^\s]+)', line)
+                if url_match:
+                    return url_match.group(1)
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting Terabox link: {e}")
+        return None
+
 async def process_auto_upload(folder_path, platform, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process auto upload setelah rename"""
     if platform == 'terabox':
@@ -533,7 +561,6 @@ async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefix = ' '.join(context.args)
     user_id = update.effective_user.id
     
-    # Validasi panjang prefix
     if len(prefix) > 20:
         await update.message.reply_text("❌ Prefix terlalu panjang (max 20 karakter)")
         return
@@ -578,6 +605,22 @@ async def autoupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     logger.info(f"User {user_id} set auto_upload to: {new_auto_upload}")
 
+async def autocleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk /autocleanup"""
+    user_id = update.effective_user.id
+    current_settings = get_user_settings(user_id)
+    new_auto_cleanup = not current_settings.get('auto_cleanup', True)
+    
+    update_user_settings(user_id, {'auto_cleanup': new_auto_cleanup})
+    
+    status = "AKTIF ✅" if new_auto_cleanup else "NONAKTIF ❌"
+    await update.message.reply_text(
+        f"✅ Auto-cleanup berhasil diatur ke: **{status}**\n\n"
+        f"Bot akan {'secara otomatis menghapus folder ' if new_auto_cleanup else 'TIDAK otomatis menghapus folder '}"
+        f"setelah upload selesai."
+    )
+    logger.info(f"User {user_id} set auto_cleanup to: {new_auto_cleanup}")
+
 async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /mysettings"""
     user_id = update.effective_user.id
@@ -589,11 +632,13 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📛 Prefix: `{settings.get('prefix', 'file_')}`
 📤 Platform: **{settings.get('platform', 'terabox').upper()}**
 🔄 Auto-upload: **{'AKTIF ✅' if settings.get('auto_upload', False) else 'NONAKTIF ❌'}**
+🧹 Auto-cleanup: **{'AKTIF ✅' if settings.get('auto_cleanup', True) else 'NONAKTIF ❌'}**
 
 **Perintah Settings:**
 /setprefix <prefix> - Atur prefix rename
 /setplatform <terabox|doodstream> - Atur platform upload
 /autoupload - Aktif/nonaktif auto-upload
+/autocleanup - Aktif/nonaktif auto-cleanup
     """
     await update.message.reply_text(settings_text, parse_mode='Markdown')
 
@@ -609,6 +654,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 Auto-rename file media
 📤 Upload ke Terabox & Doodstream
 ⚙️ Custom prefix & auto-upload
+🧹 Auto-cleanup setelah upload
 
 **Perintah:**
 /listmega - List folder di Mega.nz
@@ -620,9 +666,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /setprefix <prefix> - Atur prefix rename
 /setplatform <terabox|doodstream> - Pilih platform
 /autoupload - Aktif/nonaktif auto-upload
+/autocleanup - Aktif/nonaktif auto-cleanup
 /mysettings - Lihat settings
 
 /status - Status sistem
+/cleanup - Bersihkan folder manual
 /cancel <jobid> - Batalkan job
     """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
@@ -640,7 +688,6 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     folder_name = context.args[0]
     job_id = f"download_{update.update_id}"
     
-    # Tambah ke antrian
     download_queue.put({
         'job_id': job_id,
         'folder_name': folder_name,
@@ -651,7 +698,6 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_jobs[job_id] = 'download'
     await update.message.reply_text(f"✅ Ditambahkan ke antrian download\nFolder: `{folder_name}`\nJob ID: `{job_id}`", parse_mode='Markdown')
     
-    # Proses download
     asyncio.create_task(process_download_queue())
 
 async def process_download_queue():
@@ -693,12 +739,10 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Tidak ada folder di downloads/")
         return
     
-    # Buat keyboard untuk pilihan folder
     keyboard = []
     for folder in folders:
         keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"select_{folder}")])
     
-    # Tombol navigasi
     nav_buttons = []
     if current_page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"page_{current_page-1}"))
@@ -722,7 +766,6 @@ async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data.startswith("page_"):
-        # Handle pagination
         page = int(data.split("_")[1])
         folders, total_folders, _ = get_folders_list(page)
         
@@ -746,11 +789,9 @@ async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data.startswith("select_"):
-        # Handle folder selection
         folder_name = data.split("_", 1)[1]
         context.user_data['selected_folder'] = folder_name
         
-        # Tampilkan pilihan upload target
         keyboard = [
             [
                 InlineKeyboardButton("📤 Terabox", callback_data=f"target_terabox_{folder_name}"),
@@ -764,7 +805,6 @@ async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif data.startswith("target_"):
-        # Handle target selection
         target, folder_name = data.split("_", 2)[1:]
         folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
         
@@ -776,13 +816,11 @@ async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await upload_to_doodstream(folder_path, update, context)
     
     elif data.startswith("megadl_"):
-        # Handle Mega folder download selection
         folder_name = data.split("_", 1)[1]
         job_id = f"megadl_{query.id}"
         
         await query.edit_message_text(f"✅ Menambahkan ke antrian download: {folder_name}")
         
-        # Tambah ke antrian download
         download_queue.put({
             'job_id': job_id,
             'folder_name': folder_name,
@@ -791,7 +829,6 @@ async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         active_jobs[job_id] = 'download'
         
-        # Proses download
         asyncio.create_task(process_download_queue())
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -800,9 +837,16 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upload_count = upload_queue.qsize()
     active_count = len(active_jobs)
     
-    # Mega status
-    if not mega_client:
-        init_mega_client()
+    # Check mega-cmd status
+    mega_status = "❌ Unknown"
+    try:
+        result = subprocess.run(['mega-whoami'], capture_output=True, text=True)
+        if result.returncode == 0:
+            mega_status = f"✅ {result.stdout.strip()}"
+        else:
+            mega_status = "❌ Not logged in"
+    except:
+        mega_status = "❌ mega-cmd not available"
     
     status_text = f"""
 📊 **Status Sistem**
@@ -811,10 +855,78 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📤 Antrian Upload: {upload_count}
 🔄 Jobs Aktif: {active_count}
 
-💾 Mega Status: {"✅ Connected" if mega_client else "❌ Disconnected"}
+💾 Mega Status: {mega_status}
 📁 Download Folder: {DOWNLOADS_DIR}
+🧹 Auto-Cleanup: {'AKTIF ✅' if AUTO_CLEANUP else 'NONAKTIF ❌'}
     """
     await update.message.reply_text(status_text, parse_mode='Markdown')
+
+async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk /cleanup - Manual cleanup"""
+    try:
+        folders = [f for f in os.listdir(DOWNLOADS_DIR) 
+                  if os.path.isdir(os.path.join(DOWNLOADS_DIR, f))]
+        
+        if not folders:
+            await update.message.reply_text("✅ Tidak ada folder untuk dibersihkan")
+            return
+        
+        total_size = 0
+        for folder in folders:
+            folder_path = os.path.join(DOWNLOADS_DIR, folder)
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    total_size += os.path.getsize(os.path.join(root, file))
+        
+        # Konfirmasi cleanup
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Ya, Hapus Semua", callback_data="cleanup_confirm"),
+                InlineKeyboardButton("❌ Batal", callback_data="cleanup_cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"🧹 **Manual Cleanup**\n\n"
+            f"📁 Folder ditemukan: {len(folders)}\n"
+            f"💾 Total size: {total_size / (1024*1024):.2f} MB\n"
+            f"⚠️ Yakin ingin menghapus SEMUA folder di downloads?",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+        logger.error(f"Cleanup error: {e}")
+
+async def cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk callback cleanup"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "cleanup_confirm":
+        try:
+            folders = [f for f in os.listdir(DOWNLOADS_DIR) 
+                      if os.path.isdir(os.path.join(DOWNLOADS_DIR, f))]
+            
+            deleted_count = 0
+            for folder in folders:
+                folder_path = os.path.join(DOWNLOADS_DIR, folder)
+                shutil.rmtree(folder_path)
+                deleted_count += 1
+            
+            await query.edit_message_text(f"✅ Berhasil menghapus {deleted_count} folder")
+            logger.info(f"Manual cleanup completed: {deleted_count} folders")
+            
+        except Exception as e:
+            await query.edit_message_text(f"❌ Gagal menghapus folder: {str(e)}")
+            logger.error(f"Manual cleanup failed: {e}")
+    
+    elif data == "cleanup_cancel":
+        await query.edit_message_text("❌ Cleanup dibatalkan")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /cancel"""
@@ -824,7 +936,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     job_id = context.args[0]
     if job_id in active_jobs:
-        # Implementasi pembatalan job
         active_jobs.pop(job_id)
         await update.message.reply_text(f"✅ Job {job_id} dibatalkan")
         logger.info(f"Job cancelled: {job_id}")
@@ -838,31 +949,36 @@ def main():
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
-    # Initialize Mega client
-    init_mega_client()
-    
     # Buat aplikasi bot
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Tambah handler
+    # Tambah handler commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("listmega", listmega))
     application.add_handler(CommandHandler("download", download))
     application.add_handler(CommandHandler("rename", rename))
     application.add_handler(CommandHandler("upload", upload))
     application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("cleanup", cleanup))
     application.add_handler(CommandHandler("cancel", cancel))
     
     # Settings handlers
     application.add_handler(CommandHandler("setprefix", setprefix))
     application.add_handler(CommandHandler("setplatform", setplatform))
     application.add_handler(CommandHandler("autoupload", autoupload))
+    application.add_handler(CommandHandler("autocleanup", autocleanup))
     application.add_handler(CommandHandler("mysettings", mysettings))
     
-    application.add_handler(CallbackQueryHandler(upload_callback))
+    # Callback handlers
+    application.add_handler(CallbackQueryHandler(upload_callback, pattern="^(page_|select_|target_|megadl_)"))
+    application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
+    
+    # Jalankan cleanup untuk folder lama
+    asyncio.create_task(cleanup_old_downloads())
     
     # Jalankan bot
-    logger.info("Bot started successfully with Terabox file-by-file upload")
+    logger.info("🤖 Bot started successfully with Mega-cmd integration and Auto-Cleanup")
+    print("🤖 Bot is running... Press Ctrl+C to stop")
     application.run_polling()
 
 if __name__ == "__main__":
