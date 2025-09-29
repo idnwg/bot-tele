@@ -52,30 +52,36 @@ logger = logging.getLogger(__name__)
 # ========== MEGA-CMD CHECK & SETUP ==========
 
 def check_mega_cmd():
-    """Check jika mega-cmd terinstall dan tersedia"""
+    """Check jika mega-cmd terinstall dan tersedia - IMPROVED VERSION"""
     try:
-        # Coba beberapa kemungkinan path mega-cmd
-        possible_paths = [
-            '/usr/bin/mega-cmd',
-            '/usr/local/bin/mega-cmd', 
-            '/bin/mega-cmd',
-            '/snap/bin/mega-cmd',
-            '/usr/bin/mega-ls',
-            '/usr/local/bin/mega-ls',
-            '/bin/mega-ls'
+        # Coba berbagai command mega-cmd
+        test_commands = [
+            ['mega-ls', '--help'],
+            ['mega-whoami', '--help'],
+            ['mega-version'],
+            ['mega-cmd', '--help']
         ]
         
-        for path in possible_paths:
-            if os.path.exists(path):
-                logger.info(f"Mega-cmd found at: {path}")
-                return True
+        for cmd in test_commands:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 or 'mega' in result.stdout.lower() or 'mega' in result.stderr.lower():
+                    logger.info(f"Mega-cmd available via: {cmd[0]}")
+                    return True
+            except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+                continue
         
-        # Coba dengan command which
-        result = subprocess.run(['which', 'mega-ls'], capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            logger.info(f"Mega-cmd found via which: {result.stdout.strip()}")
-            return True
-            
+        # Coba dengan mencari di PATH
+        path_dirs = os.environ.get('PATH', '').split(':')
+        mega_executables = ['mega-ls', 'mega-get', 'mega-whoami', 'mega-cmd']
+        
+        for path_dir in path_dirs:
+            for mega_exe in mega_executables:
+                full_path = os.path.join(path_dir, mega_exe)
+                if os.path.exists(full_path) and os.access(full_path, os.X_OK):
+                    logger.info(f"Mega-cmd found at: {full_path}")
+                    return True
+        
         logger.error("Mega-cmd not found. Please install mega-cmd first.")
         return False
         
@@ -84,109 +90,157 @@ def check_mega_cmd():
         return False
 
 def get_mega_cmd_path():
-    """Dapatkan path ke mega-cmd executable"""
+    """Dapatkan path ke mega-cmd executable - IMPROVED VERSION"""
     try:
-        # Coba which mega-ls
-        result = subprocess.run(['which', 'mega-ls'], capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return 'mega-ls'  # Gunakan dari PATH
+        # Coba berbagai command
+        possible_commands = ['mega-ls', 'mega-get', 'mega-whoami', 'mega-cmd']
+        
+        for cmd in possible_commands:
+            try:
+                result = subprocess.run(['which', cmd], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    path = result.stdout.strip()
+                    logger.info(f"Found mega command: {cmd} at {path}")
+                    return cmd  # Return command name since it's in PATH
+            except Exception:
+                continue
         
         # Coba path umum
         possible_paths = [
             '/usr/bin/mega-ls',
             '/usr/local/bin/mega-ls', 
             '/bin/mega-ls',
-            '/snap/bin/mega-ls'
+            '/snap/bin/mega-ls',
+            '/usr/bin/mega-get',
+            '/usr/local/bin/mega-get',
+            '/usr/bin/mega-cmd',
+            '/usr/local/bin/mega-cmd'
         ]
         
         for path in possible_paths:
-            if os.path.exists(path):
+            if os.path.exists(path) and os.access(path, os.X_OK):
+                logger.info(f"Found mega command at: {path}")
                 return path
                 
+        logger.error("No mega-cmd executable found")
         return None
     except Exception as e:
         logger.error(f"Error getting mega-cmd path: {e}")
         return None
 
 def check_mega_login():
-    """Check jika sudah login ke Mega.nz - IMPROVED VERSION"""
+    """Check jika sudah login ke Mega.nz - ROBUST VERSION"""
     try:
-        mega_path = get_mega_cmd_path()
-        if not mega_path:
-            return False, "Mega-cmd not installed"
-        
-        # Coba beberapa metode untuk check login status
+        # Coba berbagai metode untuk check login
         methods = [
             # Method 1: mega-whoami
-            lambda: subprocess.run([mega_path.replace('mega-ls', 'mega-whoami')], 
-                                 capture_output=True, text=True, timeout=30),
-            # Method 2: mega-ls (jika whoami gagal)
-            lambda: subprocess.run([mega_path], 
-                                 capture_output=True, text=True, timeout=30),
-            # Method 3: mega-version (fallback)
-            lambda: subprocess.run([mega_path.replace('mega-ls', 'mega-version')], 
-                                 capture_output=True, text=True, timeout=30)
+            lambda: subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30),
+            # Method 2: mega-ls root
+            lambda: subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=30),
+            # Method 3: mega-cmd whoami
+            lambda: subprocess.run(['mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30)
         ]
         
         for method in methods:
             try:
                 result = method()
+                output = result.stdout.lower() + result.stderr.lower()
+                
+                # Check for successful login indicators
                 if result.returncode == 0:
-                    # Jika berhasil, cek output untuk menentukan login status
-                    output = result.stdout.strip().lower()
-                    
-                    # Jika output mengandung email atau tidak error, berarti logged in
-                    if '@' in output or 'not logged in' not in output:
-                        # Coba dapatkan email dari whoami
+                    if '@' in result.stdout or 'not logged in' not in output:
+                        # Try to get email explicitly
                         whoami_result = subprocess.run(
-                            [mega_path.replace('mega-ls', 'mega-whoami')],
+                            ['mega-whoami'], 
                             capture_output=True, text=True, timeout=30
                         )
                         if whoami_result.returncode == 0:
                             email = whoami_result.stdout.strip()
-                            return True, email
-                        else:
-                            return True, "Logged in (email not available)"
+                            return True, f"Logged in as: {email}"
+                        return True, "Logged in (email not available)"
+                
+                # Check for not logged in message
+                if 'not logged in' in output or 'no session' in output:
+                    return False, "Not logged in"
                     
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                continue
             except Exception as e:
+                logger.warning(f"Login check method failed: {e}")
                 continue
         
-        # Jika semua method gagal
-        return False, "Not logged in or session expired"
+        return False, "Unable to determine login status"
             
     except Exception as e:
-        return False, f"Error: {str(e)}"
+        return False, f"Error checking login: {str(e)}"
 
 def force_mega_relogin():
-    """Force re-login ke Mega.nz jika session expired"""
+    """Force re-login ke Mega.nz jika session expired - IMPROVED VERSION"""
     try:
         logger.info("Attempting to re-login to Mega.nz...")
         
-        # Method 1: Coba menggunakan session yang ada
-        result = subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            logger.info("Mega session is valid")
-            return True, "Session valid"
-        
-        # Method 2: Jika session expired, coba login ulang
-        # Note: Anda perlu menyimpan credential di environment variable atau file
         mega_email = os.getenv('MEGA_EMAIL')
         mega_password = os.getenv('MEGA_PASSWORD')
         
-        if mega_email and mega_password:
-            login_cmd = f'echo "{mega_password}" | mega-login {mega_email}'
-            result = subprocess.run(login_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        if not mega_email or not mega_password:
+            return False, "MEGA_EMAIL or MEGA_PASSWORD not set in environment"
+        
+        # Method 1: Try mega-login with credentials
+        try:
+            login_cmd = ['mega-login', mega_email, mega_password]
+            result = subprocess.run(login_cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
                 logger.info("Successfully re-logged in to Mega.nz")
                 return True, "Re-login successful"
-            else:
-                return False, f"Re-login failed: {result.stderr}"
-        else:
-            return False, "Mega credentials not found in environment variables"
+        except Exception as e:
+            logger.warning(f"mega-login failed: {e}")
+        
+        # Method 2: Try interactive login (for older versions)
+        try:
+            login_process = subprocess.Popen(
+                ['mega-login'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Send credentials
+            output, error = login_process.communicate(
+                input=f"{mega_email}\n{mega_password}\n",
+                timeout=30
+            )
+            
+            if login_process.returncode == 0:
+                logger.info("Successfully re-logged in via interactive method")
+                return True, "Re-login successful"
+                
+        except Exception as e:
+            logger.warning(f"Interactive login failed: {e}")
+        
+        return False, "All login methods failed"
             
     except Exception as e:
         return False, f"Re-login error: {str(e)}"
+
+def setup_mega_environment():
+    """Setup environment untuk mega-cmd - NEW FUNCTION"""
+    try:
+        # Set Mega configuration directory if not set
+        if not os.environ.get('MEGA_EMAIL') and os.path.exists('/root/.megaCmd/.session'):
+            logger.info("Found existing mega session")
+            return True
+            
+        # Check if we can initialize mega-cmd
+        init_result = subprocess.run(['mega-ls', '--help'], capture_output=True, text=True, timeout=30)
+        if init_result.returncode == 0:
+            return True
+            
+        return False
+    except Exception as e:
+        logger.error(f"Environment setup error: {e}")
+        return False
 
 # ========== USER SETTINGS MANAGEMENT ==========
 
@@ -324,11 +378,16 @@ async def send_progress_message(chat_id, message, context):
     """Mengirim/memperbarui pesan progress"""
     try:
         if 'progress_msg_id' in context.user_data:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=context.user_data['progress_msg_id'],
-                text=message
-            )
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=context.user_data['progress_msg_id'],
+                    text=message
+                )
+            except Exception:
+                # Jika edit gagal, kirim pesan baru
+                msg = await context.bot.send_message(chat_id=chat_id, text=message)
+                context.user_data['progress_msg_id'] = msg.message_id
         else:
             msg = await context.bot.send_message(chat_id=chat_id, text=message)
             context.user_data['progress_msg_id'] = msg.message_id
@@ -347,30 +406,39 @@ def safe_rename(old_path, new_path):
 # ========== MEGA.NZ FUNCTIONS ==========
 
 async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List semua folder di akun Mega menggunakan mega-cmd"""
+    """List semua folder di akun Mega menggunakan mega-cmd - IMPROVED VERSION"""
     try:
+        chat_id = update.effective_chat.id
+        
         # Check mega-cmd first
-        mega_path = get_mega_cmd_path()
-        if not mega_path:
+        if not check_mega_cmd():
             await update.message.reply_text(
                 "❌ **Mega-cmd tidak ditemukan!**\n\n"
                 "Silakan install mega-cmd terlebih dahulu:\n"
                 "1. Download dari: https://mega.nz/cmd\n"
-                "2. Install di VPS\n"
+                "2. Install di VPS: `sudo apt-get install mega-cmd`\n"
                 "3. Login: `mega-login email password`\n"
                 "4. Coba lagi /listmega"
             )
+            return
+        
+        # Setup environment
+        if not setup_mega_environment():
+            await update.message.reply_text("❌ Gagal setup environment mega-cmd")
             return
         
         # Check login status dengan auto-recovery
         is_logged_in, login_msg = check_mega_login()
         
         if not is_logged_in:
+            await send_progress_message(chat_id, "🔐 Mega.nz tidak login, mencoba login ulang...", context)
+            
             # Coba auto re-login
             relogin_success, relogin_msg = force_mega_relogin()
             if relogin_success:
                 is_logged_in, login_msg = check_mega_login()
-            else:
+            
+            if not is_logged_in:
                 await update.message.reply_text(
                     f"❌ **Belum login ke Mega.nz!**\n\n"
                     f"Error: {login_msg}\n\n"
@@ -382,62 +450,82 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
         
-        # Gunakan mega-cmd untuk list folder
-        result = subprocess.run([mega_path], capture_output=True, text=True, timeout=60)
+        await send_progress_message(chat_id, "📡 Mengambil daftar folder dari Mega.nz...", context)
         
-        if result.returncode != 0:
-            error_msg = result.stderr if result.stderr else "Unknown error"
-            await update.message.reply_text(
-                f"❌ Gagal mengambil daftar folder dari Mega.nz\n"
-                f"Error: {error_msg}"
-            )
-            logger.error(f"mega-ls failed: {error_msg}")
-            return
+        # Gunakan mega-cmd untuk list folder dengan berbagai metode
+        list_methods = [
+            ['mega-ls', '/'],
+            ['mega-cmd', 'ls', '/'],
+            ['mega-ls']
+        ]
         
-        lines = result.stdout.strip().split('\n')
         folders = []
-        
-        for line in lines:
-            line = line.strip()
-            if line and not line.startswith('[') and not line.startswith('Used') and not line.startswith('Total'):
-                # Filter hanya folder (tidak ada ekstensi file)
-                if '.' not in line or any(line.endswith(ext) for ext in ['.txt', '.zip', '.rar']):
-                    # Skip file, hanya ambil folder
-                    if '/' not in line and '\\' not in line:
-                        folders.append(line)
+        for method in list_methods:
+            try:
+                result = subprocess.run(method, capture_output=True, text=True, timeout=60)
+                
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if line and not line.startswith('[') and not line.startswith('Used') and not line.startswith('Total'):
+                            # Filter hanya folder (tidak ada ekstensi file umum)
+                            if not any(line.endswith(ext) for ext in ['.txt', '.zip', '.rar', '.mp4', '.jpg', '.png']):
+                                if '/' not in line and '\\' not in line and line not in folders:
+                                    folders.append(line)
+                    
+                    if folders:
+                        break
+            except Exception as e:
+                logger.warning(f"List method failed: {method}, error: {e}")
+                continue
         
         if not folders:
-            await update.message.reply_text("📭 Tidak ada folder di akun Mega.nz")
+            await send_progress_message(chat_id, "📭 Tidak ada folder di akun Mega.nz", context)
             return
         
         # Buat keyboard untuk pilihan folder
         keyboard = []
-        for folder in sorted(folders):
+        for folder in sorted(folders)[:50]:  # Limit to 50 folders
             keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"megadl_{folder}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"📂 Pilih folder dari Mega.nz untuk didownload:",
+        await send_progress_message(chat_id, 
+            f"📂 Pilih folder dari Mega.nz untuk didownload ({len(folders)} folder ditemukan):",
+            context
+        )
+        
+        # Kirim pesan dengan keyboard terpisah
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Pilih folder:",
             reply_markup=reply_markup
         )
         
     except subprocess.TimeoutExpired:
-        await update.message.reply_text("❌ Timeout: Gagal mengambil daftar folder (terlalu lama)")
+        await send_progress_message(chat_id, "❌ Timeout: Gagal mengambil daftar folder (terlalu lama)", context)
         logger.error("mega-ls timeout")
     except Exception as e:
-        await update.message.reply_text(f"❌ Error mengambil daftar folder: {str(e)}")
+        error_msg = f"❌ Error mengambil daftar folder: {str(e)}"
+        await send_progress_message(chat_id, error_msg, context)
         logger.error(f"List mega folders error: {e}")
 
 async def download_mega_folder(folder_name, job_id, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download folder dari Mega.nz menggunakan mega-cmd"""
+    """Download folder dari Mega.nz menggunakan mega-cmd - IMPROVED VERSION"""
     try:
         chat_id = update.effective_chat.id
         user_settings = get_user_settings(chat_id)
         
         # Check mega-cmd first
-        mega_path = get_mega_cmd_path()
-        if not mega_path:
+        if not check_mega_cmd():
             await send_progress_message(chat_id, "❌ Mega-cmd tidak ditemukan! Silakan install terlebih dahulu.", context)
+            return
+        
+        # Check login status
+        is_logged_in, login_msg = check_mega_login()
+        if not is_logged_in:
+            await send_progress_message(chat_id, "❌ Tidak login ke Mega.nz. Gunakan /listmega untuk login otomatis.", context)
             return
         
         await send_progress_message(chat_id, f"📥 Memulai download folder: {folder_name}", context)
@@ -446,17 +534,33 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         target_path = os.path.join(DOWNLOADS_DIR, folder_name)
         os.makedirs(target_path, exist_ok=True)
         
-        # Download folder recursive - gunakan mega-get
-        mega_get_path = mega_path.replace('mega-ls', 'mega-get')
-        cmd = [mega_get_path, f'/{folder_name}', target_path]
+        # Download folder recursive - coba berbagai metode
+        download_methods = [
+            ['mega-get', f'/{folder_name}', target_path],
+            ['mega-cmd', 'get', f'/{folder_name}', target_path]
+        ]
         
-        await send_progress_message(chat_id, f"⏳ Download dalam proses...", context)
+        download_success = False
+        for method in download_methods:
+            try:
+                await send_progress_message(chat_id, f"⏳ Download dalam proses menggunakan {method[0]}...", context)
+                
+                result = subprocess.run(method, capture_output=True, text=True, timeout=7200)  # 2 hour timeout
+                
+                if result.returncode == 0:
+                    download_success = True
+                    break
+                else:
+                    logger.warning(f"Download method {method} failed: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Download method {method} timeout")
+                continue
+            except Exception as e:
+                logger.warning(f"Download method {method} error: {e}")
+                continue
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
-        
-        if result.returncode != 0:
-            error_msg = result.stderr if result.stderr else "Unknown error"
-            raise Exception(f"Download gagal: {error_msg}")
+        if not download_success:
+            raise Exception("Semua metode download gagal")
         
         await send_progress_message(chat_id, f"✅ Download selesai: {folder_name}", context)
         
@@ -863,14 +967,14 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /start"""
     # Check mega-cmd status
-    mega_path = get_mega_cmd_path()
+    mega_available = check_mega_cmd()
     is_logged_in, login_msg = check_mega_login()
     
-    if mega_path:
+    if mega_available:
         if is_logged_in:
             mega_status = f"✅ Terinstall & Login sebagai: {login_msg}"
         else:
-            mega_status = f"❌ Terinstall tapi belum login: {login_msg}"
+            mega_status = f"⚠️ Terinstall tapi belum login: {login_msg}"
     else:
         mega_status = "❌ Mega-cmd tidak terinstall"
     
@@ -1068,13 +1172,13 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_count = len(active_jobs)
     
     # Check mega-cmd status
-    mega_path = get_mega_cmd_path()
+    mega_available = check_mega_cmd()
     is_logged_in, login_msg = check_mega_login()
     
-    if mega_path and is_logged_in:
+    if mega_available and is_logged_in:
         mega_status = f"✅ {login_msg}"
-    elif mega_path:
-        mega_status = f"❌ {login_msg}"
+    elif mega_available:
+        mega_status = f"⚠️ {login_msg}"
     else:
         mega_status = "❌ mega-cmd not available"
     
@@ -1175,14 +1279,18 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== MAIN FUNCTION ==========
 
 def main():
-    """Main function - FINAL STABLE VERSION"""
+    """Main function - IMPROVED VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
-    # Check mega-cmd pada startup
+    # Check dan setup mega-cmd pada startup
+    logger.info("Checking mega-cmd installation...")
     if not check_mega_cmd():
-        logger.warning("Mega-cmd not found. Please install mega-cmd for Mega.nz functionality.")
+        logger.warning("Mega-cmd not found. Mega.nz functionality will be disabled.")
     else:
+        # Setup environment
+        setup_mega_environment()
+        
         # Check login status
         is_logged_in, login_msg = check_mega_login()
         if is_logged_in:
@@ -1221,7 +1329,7 @@ def main():
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
     
     # Jalankan bot
-    logger.info("🤖 Bot started successfully with Mega-cmd integration and Auto-Cleanup")
+    logger.info("🤖 Bot started successfully with improved Mega-cmd integration")
     print("🤖 Bot is running... Press Ctrl+C to stop")
     application.run_polling()
 
