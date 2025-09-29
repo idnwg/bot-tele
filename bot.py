@@ -52,35 +52,38 @@ logger = logging.getLogger(__name__)
 # ========== MEGA-CMD CHECK & SETUP ==========
 
 def check_mega_cmd():
-    """Check jika mega-cmd terinstall dan tersedia - IMPROVED VERSION"""
+    """Check jika mega-cmd terinstall dan tersedia - SNAP COMPATIBLE"""
     try:
-        # Coba berbagai command mega-cmd
+        # Cek berbagai kemungkinan instalasi mega-cmd
         test_commands = [
             ['mega-ls', '--help'],
-            ['mega-whoami', '--help'],
+            ['mega-whoami', '--help'], 
             ['mega-version'],
-            ['mega-cmd', '--help']
+            ['mega-cmd', '--help'],
+            ['snap', 'run', 'mega-cmd', '--help']
         ]
         
         for cmd in test_commands:
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
                 if result.returncode == 0 or 'mega' in result.stdout.lower() or 'mega' in result.stderr.lower():
-                    logger.info(f"Mega-cmd available via: {cmd[0]}")
+                    logger.info(f"Mega-cmd available via: {' '.join(cmd)}")
                     return True
             except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
                 continue
         
-        # Coba dengan mencari di PATH
-        path_dirs = os.environ.get('PATH', '').split(':')
-        mega_executables = ['mega-ls', 'mega-get', 'mega-whoami', 'mega-cmd']
+        # Cek di snap paths
+        snap_paths = [
+            '/snap/bin/mega-cmd',
+            '/snap/bin/mega-ls',
+            '/snap/bin/mega-get',
+            '/snap/bin/mega-whoami'
+        ]
         
-        for path_dir in path_dirs:
-            for mega_exe in mega_executables:
-                full_path = os.path.join(path_dir, mega_exe)
-                if os.path.exists(full_path) and os.access(full_path, os.X_OK):
-                    logger.info(f"Mega-cmd found at: {full_path}")
-                    return True
+        for path in snap_paths:
+            if os.path.exists(path) and os.access(path, os.X_OK):
+                logger.info(f"Mega-cmd found at snap path: {path}")
+                return True
         
         logger.error("Mega-cmd not found. Please install mega-cmd first.")
         return False
@@ -90,9 +93,9 @@ def check_mega_cmd():
         return False
 
 def get_mega_cmd_path():
-    """Dapatkan path ke mega-cmd executable - IMPROVED VERSION"""
+    """Dapatkan path ke mega-cmd executable - SNAP COMPATIBLE"""
     try:
-        # Coba berbagai command
+        # Prioritaskan command yang tersedia di PATH
         possible_commands = ['mega-ls', 'mega-get', 'mega-whoami', 'mega-cmd']
         
         for cmd in possible_commands:
@@ -100,27 +103,23 @@ def get_mega_cmd_path():
                 result = subprocess.run(['which', cmd], capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     path = result.stdout.strip()
-                    logger.info(f"Found mega command: {cmd} at {path}")
+                    logger.info(f"Found mega command via which: {cmd} -> {path}")
                     return cmd  # Return command name since it's in PATH
             except Exception:
                 continue
         
-        # Coba path umum
-        possible_paths = [
-            '/usr/bin/mega-ls',
-            '/usr/local/bin/mega-ls', 
-            '/bin/mega-ls',
+        # Cek di snap paths
+        snap_commands = [
             '/snap/bin/mega-ls',
-            '/usr/bin/mega-get',
-            '/usr/local/bin/mega-get',
-            '/usr/bin/mega-cmd',
-            '/usr/local/bin/mega-cmd'
+            '/snap/bin/mega-get', 
+            '/snap/bin/mega-whoami',
+            '/snap/bin/mega-cmd'
         ]
         
-        for path in possible_paths:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                logger.info(f"Found mega command at: {path}")
-                return path
+        for cmd_path in snap_commands:
+            if os.path.exists(cmd_path) and os.access(cmd_path, os.X_OK):
+                logger.info(f"Found mega command at snap path: {cmd_path}")
+                return cmd_path
                 
         logger.error("No mega-cmd executable found")
         return None
@@ -129,16 +128,18 @@ def get_mega_cmd_path():
         return None
 
 def check_mega_login():
-    """Check jika sudah login ke Mega.nz - ROBUST VERSION"""
+    """Check jika sudah login ke Mega.nz - SNAP COMPATIBLE"""
     try:
         # Coba berbagai metode untuk check login
         methods = [
-            # Method 1: mega-whoami
+            # Method 1: mega-whoami langsung
             lambda: subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30),
-            # Method 2: mega-ls root
-            lambda: subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=30),
-            # Method 3: mega-cmd whoami
-            lambda: subprocess.run(['mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30)
+            # Method 2: mega-cmd whoami
+            lambda: subprocess.run(['mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30),
+            # Method 3: snap run mega-cmd whoami
+            lambda: subprocess.run(['snap', 'run', 'mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30),
+            # Method 4: mega-ls root (indirect check)
+            lambda: subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=30)
         ]
         
         for method in methods:
@@ -150,17 +151,25 @@ def check_mega_login():
                 if result.returncode == 0:
                     if '@' in result.stdout or 'not logged in' not in output:
                         # Try to get email explicitly
-                        whoami_result = subprocess.run(
-                            ['mega-whoami'], 
-                            capture_output=True, text=True, timeout=30
-                        )
-                        if whoami_result.returncode == 0:
-                            email = whoami_result.stdout.strip()
-                            return True, f"Logged in as: {email}"
+                        email_methods = [
+                            lambda: subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30),
+                            lambda: subprocess.run(['mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30),
+                            lambda: subprocess.run(['snap', 'run', 'mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30)
+                        ]
+                        
+                        for email_method in email_methods:
+                            try:
+                                email_result = email_method()
+                                if email_result.returncode == 0 and '@' in email_result.stdout:
+                                    email = email_result.stdout.strip()
+                                    return True, f"Logged in as: {email}"
+                            except Exception:
+                                continue
+                        
                         return True, "Logged in (email not available)"
                 
                 # Check for not logged in message
-                if 'not logged in' in output or 'no session' in output:
+                if 'not logged in' in output or 'no session' in output or 'login' in output:
                     return False, "Not logged in"
                     
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -175,7 +184,7 @@ def check_mega_login():
         return False, f"Error checking login: {str(e)}"
 
 def force_mega_relogin():
-    """Force re-login ke Mega.nz jika session expired - IMPROVED VERSION"""
+    """Force re-login ke Mega.nz jika session expired - SNAP COMPATIBLE"""
     try:
         logger.info("Attempting to re-login to Mega.nz...")
         
@@ -185,39 +194,33 @@ def force_mega_relogin():
         if not mega_email or not mega_password:
             return False, "MEGA_EMAIL or MEGA_PASSWORD not set in environment"
         
-        # Method 1: Try mega-login with credentials
-        try:
-            login_cmd = ['mega-login', mega_email, mega_password]
-            result = subprocess.run(login_cmd, capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                logger.info("Successfully re-logged in to Mega.nz")
-                return True, "Re-login successful"
-        except Exception as e:
-            logger.warning(f"mega-login failed: {e}")
+        # Coba berbagai metode login
+        login_methods = [
+            # Method 1: mega-login langsung
+            lambda: subprocess.run(['mega-login', mega_email, mega_password], 
+                                 capture_output=True, text=True, timeout=30),
+            # Method 2: mega-cmd login
+            lambda: subprocess.run(['mega-cmd', 'login', mega_email, mega_password],
+                                 capture_output=True, text=True, timeout=30),
+            # Method 3: snap run mega-cmd login
+            lambda: subprocess.run(['snap', 'run', 'mega-cmd', 'login', mega_email, mega_password],
+                                 capture_output=True, text=True, timeout=30),
+            # Method 4: Interactive login dengan echo
+            lambda: subprocess.run(f'echo "{mega_password}" | mega-login {mega_email}',
+                                 shell=True, capture_output=True, text=True, timeout=30)
+        ]
         
-        # Method 2: Try interactive login (for older versions)
-        try:
-            login_process = subprocess.Popen(
-                ['mega-login'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            # Send credentials
-            output, error = login_process.communicate(
-                input=f"{mega_email}\n{mega_password}\n",
-                timeout=30
-            )
-            
-            if login_process.returncode == 0:
-                logger.info("Successfully re-logged in via interactive method")
-                return True, "Re-login successful"
-                
-        except Exception as e:
-            logger.warning(f"Interactive login failed: {e}")
+        for method in login_methods:
+            try:
+                result = method()
+                if result.returncode == 0:
+                    logger.info("Successfully re-logged in to Mega.nz")
+                    return True, "Re-login successful"
+                else:
+                    logger.warning(f"Login method failed: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"Login method error: {e}")
+                continue
         
         return False, "All login methods failed"
             
@@ -225,22 +228,51 @@ def force_mega_relogin():
         return False, f"Re-login error: {str(e)}"
 
 def setup_mega_environment():
-    """Setup environment untuk mega-cmd - NEW FUNCTION"""
+    """Setup environment untuk mega-cmd - khusus untuk snap"""
     try:
-        # Set Mega configuration directory if not set
-        if not os.environ.get('MEGA_EMAIL') and os.path.exists('/root/.megaCmd/.session'):
-            logger.info("Found existing mega session")
-            return True
-            
-        # Check if we can initialize mega-cmd
-        init_result = subprocess.run(['mega-ls', '--help'], capture_output=True, text=True, timeout=30)
-        if init_result.returncode == 0:
-            return True
-            
-        return False
+        # Untuk snap installation, pastikan environment variables sudah benar
+        snap_user_common = os.path.expanduser('~/snap/mega-cmd/current')
+        snap_user_data = os.path.expanduser('~/snap/mega-cmd/common')
+        
+        # Buat direktori jika belum ada
+        os.makedirs(snap_user_common, exist_ok=True)
+        os.makedirs(snap_user_data, exist_ok=True)
+        
+        # Set environment variables untuk mega-cmd snap
+        os.environ['MEGA_EMAIL'] = os.getenv('MEGA_EMAIL', '')
+        os.environ['MEGA_PASSWORD'] = os.getenv('MEGA_PASSWORD', '')
+        
+        logger.info("Mega-cmd snap environment setup completed")
+        return True
     except Exception as e:
         logger.error(f"Environment setup error: {e}")
         return False
+
+def run_mega_command(command_args, timeout=60):
+    """Jalankan command mega dengan kompatibilitas snap"""
+    try:
+        # Jika command_args adalah string, convert ke list
+        if isinstance(command_args, str):
+            command_args = command_args.split()
+        
+        # Cek jika command tersedia di PATH
+        try:
+            result = subprocess.run(command_args, capture_output=True, text=True, timeout=timeout)
+            return result
+        except FileNotFoundError:
+            # Jika tidak ditemukan, coba dengan snap run
+            if command_args[0].startswith('mega-'):
+                snap_command = ['snap', 'run', 'mega-cmd'] + command_args[0].split('-')[1:]
+                if len(command_args) > 1:
+                    snap_command.extend(command_args[1:])
+                result = subprocess.run(snap_command, capture_output=True, text=True, timeout=timeout)
+                return result
+            else:
+                raise
+        
+    except Exception as e:
+        logger.error(f"Error running mega command {command_args}: {e}")
+        raise
 
 # ========== USER SETTINGS MANAGEMENT ==========
 
@@ -332,7 +364,7 @@ async def cleanup_after_upload(folder_path, update: Update, context: ContextType
         return False
 
 def cleanup_old_downloads():
-    """Bersihkan folder download yang sudah lama - SYNC VERSION"""
+    """Bersihkan folder download yang sudah lama"""
     try:
         current_time = time.time()
         cleanup_threshold = 24 * 3600  # 24 jam
@@ -406,7 +438,7 @@ def safe_rename(old_path, new_path):
 # ========== MEGA.NZ FUNCTIONS ==========
 
 async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List semua folder di akun Mega menggunakan mega-cmd - IMPROVED VERSION"""
+    """List semua folder di akun Mega menggunakan mega-cmd - SNAP COMPATIBLE"""
     try:
         chat_id = update.effective_chat.id
         
@@ -414,11 +446,10 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not check_mega_cmd():
             await update.message.reply_text(
                 "❌ **Mega-cmd tidak ditemukan!**\n\n"
-                "Silakan install mega-cmd terlebih dahulu:\n"
-                "1. Download dari: https://mega.nz/cmd\n"
-                "2. Install di VPS: `sudo apt-get install mega-cmd`\n"
-                "3. Login: `mega-login email password`\n"
-                "4. Coba lagi /listmega"
+                "Untuk instalasi snap, pastikan:\n"
+                "1. Sudah install: `sudo snap install mega-cmd`\n"
+                "2. Sudah login: `mega-login email password`\n"
+                "3. Coba lagi /listmega"
             )
             return
         
@@ -442,7 +473,7 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"❌ **Belum login ke Mega.nz!**\n\n"
                     f"Error: {login_msg}\n\n"
-                    "Silakan login manual dengan perintah:\n"
+                    "Untuk snap installation, login dengan:\n"
                     "`mega-login email_password_anda`\n\n"
                     "Atau tambahkan di .env:\n"
                     "MEGA_EMAIL=email_anda\n"
@@ -452,17 +483,17 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await send_progress_message(chat_id, "📡 Mengambil daftar folder dari Mega.nz...", context)
         
-        # Gunakan mega-cmd untuk list folder dengan berbagai metode
+        # Gunakan run_mega_command yang kompatibel dengan snap
         list_methods = [
             ['mega-ls', '/'],
             ['mega-cmd', 'ls', '/'],
-            ['mega-ls']
+            ['snap', 'run', 'mega-cmd', 'ls', '/']
         ]
         
         folders = []
         for method in list_methods:
             try:
-                result = subprocess.run(method, capture_output=True, text=True, timeout=60)
+                result = run_mega_command(method, timeout=60)
                 
                 if result.returncode == 0:
                     lines = result.stdout.strip().split('\n')
@@ -491,17 +522,14 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"megadl_{folder}")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await send_progress_message(chat_id, 
-            f"📂 Pilih folder dari Mega.nz untuk didownload ({len(folders)} folder ditemukan):",
-            context
-        )
         
-        # Kirim pesan dengan keyboard terpisah
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Pilih folder:",
+            text=f"📂 Pilih folder dari Mega.nz untuk didownload ({len(folders)} folder ditemukan):",
             reply_markup=reply_markup
         )
+        
+        await send_progress_message(chat_id, f"✅ Ditemukan {len(folders)} folder di Mega.nz", context)
         
     except subprocess.TimeoutExpired:
         await send_progress_message(chat_id, "❌ Timeout: Gagal mengambil daftar folder (terlalu lama)", context)
@@ -512,7 +540,7 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"List mega folders error: {e}")
 
 async def download_mega_folder(folder_name, job_id, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Download folder dari Mega.nz menggunakan mega-cmd - IMPROVED VERSION"""
+    """Download folder dari Mega.nz menggunakan mega-cmd - SNAP COMPATIBLE"""
     try:
         chat_id = update.effective_chat.id
         user_settings = get_user_settings(chat_id)
@@ -534,18 +562,19 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         target_path = os.path.join(DOWNLOADS_DIR, folder_name)
         os.makedirs(target_path, exist_ok=True)
         
-        # Download folder recursive - coba berbagai metode
+        # Download folder recursive - coba berbagai metode yang kompatibel snap
         download_methods = [
             ['mega-get', f'/{folder_name}', target_path],
-            ['mega-cmd', 'get', f'/{folder_name}', target_path]
+            ['mega-cmd', 'get', f'/{folder_name}', target_path],
+            ['snap', 'run', 'mega-cmd', 'get', f'/{folder_name}', target_path]
         ]
         
         download_success = False
         for method in download_methods:
             try:
-                await send_progress_message(chat_id, f"⏳ Download dalam proses menggunakan {method[0]}...", context)
+                await send_progress_message(chat_id, f"⏳ Download dalam proses...", context)
                 
-                result = subprocess.run(method, capture_output=True, text=True, timeout=7200)  # 2 hour timeout
+                result = run_mega_command(method, timeout=7200)  # 2 hour timeout
                 
                 if result.returncode == 0:
                     download_success = True
@@ -639,7 +668,7 @@ async def auto_rename_media_files(folder_path, prefix, update: Update, context: 
 # ========== UPLOAD FUNCTIONS ==========
 
 async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Upload ke Terabox menggunakan CLI - File per file dengan folder di Terabox"""
+    """Upload ke Terabox menggunakan CLI"""
     try:
         chat_id = update.effective_chat.id
         folder_name = os.path.basename(folder_path)
@@ -984,7 +1013,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **Status Mega.nz:** {mega_status}
 
 **Fitur:**
-📥 Download folder dari Mega.nz
+📥 Download folder dari Mega.nz (Snap compatible)
 🔄 Auto-rename file media
 📤 Upload ke Terabox & Doodstream
 ⚙️ Custom prefix & auto-upload
@@ -1279,12 +1308,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== MAIN FUNCTION ==========
 
 def main():
-    """Main function - IMPROVED VERSION"""
+    """Main function - SNAP COMPATIBLE VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
     # Check dan setup mega-cmd pada startup
-    logger.info("Checking mega-cmd installation...")
+    logger.info("Checking mega-cmd installation (Snap compatible)...")
     if not check_mega_cmd():
         logger.warning("Mega-cmd not found. Mega.nz functionality will be disabled.")
     else:
@@ -1298,7 +1327,7 @@ def main():
         else:
             logger.warning(f"Mega.nz login issue: {login_msg}")
     
-    # Jalankan cleanup untuk folder lama (sync version)
+    # Jalankan cleanup untuk folder lama
     try:
         cleanup_old_downloads()
     except Exception as e:
@@ -1329,7 +1358,7 @@ def main():
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
     
     # Jalankan bot
-    logger.info("🤖 Bot started successfully with improved Mega-cmd integration")
+    logger.info("🤖 Bot started successfully with Snap-compatible Mega-cmd integration")
     print("🤖 Bot is running... Press Ctrl+C to stop")
     application.run_polling()
 
