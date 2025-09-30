@@ -95,45 +95,111 @@ def delete_mega_credentials():
 def check_mega_cmd():
     """Check jika mega-cmd terinstall"""
     try:
-        result = subprocess.run(['mega-ls', '--help'], capture_output=True, text=True, timeout=10)
-        return result.returncode == 0 or 'mega' in result.stdout.lower()
-    except:
+        # Coba berbagai command untuk mengecek instalasi
+        test_commands = [
+            ['mega-ls', '--help'],
+            ['mega-whoami'],
+            ['mega-version'],
+            ['mega-cmd', '--help'],
+            ['snap', 'run', 'mega-cmd', '--help']
+        ]
+        
+        for cmd in test_commands:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 or 'mega' in result.stdout.lower() or 'mega' in result.stderr.lower():
+                    logger.info(f"Mega-cmd available via: {' '.join(cmd)}")
+                    return True
+            except:
+                continue
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error checking mega-cmd: {e}")
         return False
 
 def check_mega_login():
-    """Check status login Mega.nz"""
+    """Check status login Mega.nz dengan berbagai metode"""
     try:
-        result = subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30)
-        if result.returncode == 0 and result.stdout.strip():
-            output = result.stdout.strip()
-            if '@' in output:
-                return True, f"Logged in as: {output}"
-            return True, f"Status: {output}"
+        # Method 1: mega-whoami
+        try:
+            result = subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                output = result.stdout.strip()
+                if '@' in output:
+                    return True, f"Logged in as: {output}"
+                elif output and 'not logged in' not in output.lower():
+                    return True, f"Status: {output}"
+        except Exception as e:
+            logger.debug(f"mega-whoami failed: {e}")
+
+        # Method 2: mega-cmd whoami
+        try:
+            result = subprocess.run(['mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                output = result.stdout.strip()
+                if '@' in output:
+                    return True, f"Logged in as: {output}"
+        except Exception as e:
+            logger.debug(f"mega-cmd whoami failed: {e}")
+
+        # Method 3: Try to list root directory
+        try:
+            result = subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                return True, "Logged in (verified via directory listing)"
+        except Exception as e:
+            logger.debug(f"mega-ls check failed: {e}")
+
         return False, "Not logged in"
+            
     except Exception as e:
         return False, f"Error: {str(e)}"
 
 def login_to_mega(email, password):
-    """Login ke Mega.nz dengan credential"""
+    """Login ke Mega.nz dengan berbagai metode"""
     try:
-        # Method 1: Direct login
+        logger.info(f"Attempting login to Mega.nz for: {email}")
+        
+        # Method 1: Direct login dengan mega-login
         try:
+            logger.info("Trying direct login with mega-login...")
             result = subprocess.run(
                 ['mega-login', email, password],
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
-                # Verify login worked
-                time.sleep(2)
+                # Beri waktu untuk session terbentuk
+                time.sleep(3)
                 is_logged_in, msg = check_mega_login()
                 if is_logged_in:
-                    logger.info(f"Successfully logged in as: {email}")
+                    logger.info(f"Direct login successful for: {email}")
                     return True, "Login successful"
+            else:
+                logger.warning(f"Direct login failed: {result.stderr}")
         except Exception as e:
-            logger.warning(f"Direct login failed: {e}")
+            logger.warning(f"Direct login error: {e}")
 
-        # Method 2: Interactive login
+        # Method 2: Login dengan echo (untuk menghindari password di command line)
         try:
+            logger.info("Trying echo method login...")
+            # Gunakan shell command dengan echo untuk input password
+            cmd = f'echo "{password}" | mega-login {email}'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                time.sleep(3)
+                is_logged_in, msg = check_mega_login()
+                if is_logged_in:
+                    logger.info(f"Echo login successful for: {email}")
+                    return True, "Login successful"
+            else:
+                logger.warning(f"Echo login failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Echo login error: {e}")
+
+        # Method 3: Interactive login menggunakan expect atau Python
+        try:
+            logger.info("Trying interactive login...")
             process = subprocess.Popen(
                 ['mega-login'],
                 stdin=subprocess.PIPE,
@@ -141,48 +207,105 @@ def login_to_mega(email, password):
                 stderr=subprocess.PIPE,
                 text=True
             )
+            # Kirim email dan password
             output, error = process.communicate(
                 input=f"{email}\n{password}\n",
                 timeout=30
             )
             if process.returncode == 0:
-                time.sleep(2)
+                time.sleep(3)
                 is_logged_in, msg = check_mega_login()
                 if is_logged_in:
-                    logger.info(f"Successfully logged in interactively as: {email}")
+                    logger.info(f"Interactive login successful for: {email}")
                     return True, "Login successful"
+            else:
+                logger.warning(f"Interactive login failed: {error}")
         except Exception as e:
-            logger.warning(f"Interactive login failed: {e}")
+            logger.warning(f"Interactive login error: {e}")
 
-        return False, "Login failed with all methods"
+        # Method 4: Gunakan mega-cmd login
+        try:
+            logger.info("Trying mega-cmd login...")
+            result = subprocess.run(
+                ['mega-cmd', 'login', email, password],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                time.sleep(3)
+                is_logged_in, msg = check_mega_login()
+                if is_logged_in:
+                    logger.info(f"mega-cmd login successful for: {email}")
+                    return True, "Login successful"
+            else:
+                logger.warning(f"mega-cmd login failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"mega-cmd login error: {e}")
+
+        # Method 5: Gunakan snap run (untuk snap installation)
+        try:
+            logger.info("Trying snap run login...")
+            result = subprocess.run(
+                ['snap', 'run', 'mega-cmd', 'login', email, password],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                time.sleep(3)
+                is_logged_in, msg = check_mega_login()
+                if is_logged_in:
+                    logger.info(f"Snap login successful for: {email}")
+                    return True, "Login successful"
+            else:
+                logger.warning(f"Snap login failed: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Snap login error: {e}")
+
+        return False, "All login methods failed. Please check your credentials and try again."
         
     except Exception as e:
+        logger.error(f"Login process error: {e}")
         return False, f"Login error: {str(e)}"
 
 def ensure_mega_session():
-    """Pastikan session Mega.nz valid"""
-    try:
-        # Check if already logged in
-        is_logged_in, login_msg = check_mega_login()
-        if is_logged_in:
-            logger.info(f"Mega session valid: {login_msg}")
-            return True
-        
-        # Try to login with saved credentials
-        email, password = load_mega_credentials()
-        if email and password:
-            logger.info(f"Attempting auto-login with saved credentials for: {email}")
-            login_success, login_result = login_to_mega(email, password)
-            if login_success:
+    """Pastikan session Mega.nz valid dengan auto-retry"""
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            # Check if already logged in
+            is_logged_in, login_msg = check_mega_login()
+            if is_logged_in:
+                logger.info(f"Mega session valid: {login_msg}")
                 return True
+            
+            # Try to login with saved credentials
+            email, password = load_mega_credentials()
+            if email and password:
+                logger.info(f"Attempting auto-login (attempt {attempt + 1}) for: {email}")
+                login_success, login_result = login_to_mega(email, password)
+                if login_success:
+                    return True
+                else:
+                    logger.warning(f"Auto-login attempt {attempt + 1} failed: {login_result}")
+                    
+                    # Jika gagal, coba logout dulu lalu login lagi
+                    if attempt < max_retries - 1:
+                        logger.info("Trying logout and re-login...")
+                        try:
+                            subprocess.run(['mega-logout'], capture_output=True, timeout=10)
+                            time.sleep(2)
+                        except:
+                            pass
             else:
-                logger.warning(f"Auto-login failed: {login_result}")
-        
-        return False
-        
-    except Exception as e:
-        logger.error(f"Error ensuring mega session: {e}")
-        return False
+                logger.warning("No saved Mega credentials found")
+                break
+                
+        except Exception as e:
+            logger.error(f"Error ensuring mega session (attempt {attempt + 1}): {e}")
+            
+        # Tunggu sebelum retry
+        if attempt < max_retries - 1:
+            time.sleep(5)
+    
+    return False
 
 # ========== USER SETTINGS MANAGEMENT ==========
 
@@ -366,10 +489,13 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_progress_message(chat_id, "🔐 Memeriksa session Mega.nz...", context)
         if not ensure_mega_session():
             await update.message.reply_text(
-                "❌ **Belum login ke Mega.nz!**\n\n"
+                "❌ **Tidak dapat terhubung ke Mega.nz!**\n\n"
                 "Silakan login terlebih dahulu dengan:\n"
                 "`/loginmega email password`\n\n"
-                "Atau pastikan credential sudah tersimpan."
+                "Pastikan:\n"
+                "• Email dan password benar\n"
+                "• Koneksi internet stabil\n"
+                "• Mega-cmd sudah terinstall dengan benar"
             )
             return
         
@@ -786,7 +912,7 @@ async def loginmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Save credentials first
     if save_mega_credentials(email, password):
-        # Try to login
+        # Try to login dengan berbagai metode
         login_success, login_result = login_to_mega(email, password)
         
         if login_success:
@@ -800,9 +926,10 @@ async def loginmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                f"⚠️ **Credential tersimpan tapi login gagal**\n\n"
+                f"⚠️ **Login manual gagal**\n\n"
                 f"Error: {login_result}\n\n"
-                f"Credential sudah disimpan, bot akan mencoba login otomatis saat diperlukan."
+                f"Tapi credential sudah disimpan. Bot akan mencoba login otomatis saat diperlukan.\n"
+                f"Anda tetap bisa mencoba `/listmega` atau `/download`."
             )
     else:
         await update.message.reply_text("❌ Gagal menyimpan credential Mega.nz")
@@ -1276,7 +1403,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== MAIN FUNCTION ==========
 
 def main():
-    """Main function - SIMPLIFIED MEGA LOGIN VERSION"""
+    """Main function - IMPROVED MEGA LOGIN VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
@@ -1331,7 +1458,7 @@ def main():
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
     
     # Jalankan bot
-    logger.info("🤖 Bot started successfully with Simplified Mega Login System")
+    logger.info("🤖 Bot started successfully with Improved Mega Login System")
     print("🤖 Bot is running... Press Ctrl+C to stop")
     application.run_polling()
 
