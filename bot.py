@@ -16,10 +16,9 @@ from queue import Queue
 from dotenv import load_dotenv
 import html
 
-# Load environment variables
+
 load_dotenv(os.path.join('/root/bot-tele', '.env'))
 
-# Konfigurasi dari .env
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 TERABOX_CONNECT_KEY = os.getenv('TERABOX_CONNECT_KEY')
 DOODSTREAM_API_KEY = os.getenv('DOODSTREAM_API_KEY')
@@ -33,18 +32,15 @@ USER_SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 MEGA_CREDENTIALS_FILE = os.path.join(BASE_DIR, "mega.json")
 FOLDER_INDEX_FILE = os.path.join(BASE_DIR, "folder_index.json")
 
-# Antrian jobs
 download_queue = Queue()
 upload_queue = Queue()
 active_jobs = {}
 
 folder_cache = {}
 
-# Ekstensi file yang didukung untuk rename
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.mpeg'}
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -55,7 +51,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== HELPER FUNCTIONS FOR SAFE MESSAGING ==========
 
 def escape_markdown(text):
     """Escape special characters for MarkdownV2"""
@@ -79,7 +74,6 @@ async def safe_send_message(context, chat_id, text, reply_markup=None, parse_mod
         )
     except Exception as e:
         logger.error(f"Error sending message: {e}")
-        # Fallback: send without formatting
         try:
             return await context.bot.send_message(
                 chat_id=chat_id,
@@ -103,14 +97,12 @@ async def safe_edit_message(context, chat_id, message_id, text, reply_markup=Non
         )
     except Exception as e:
         logger.error(f"Error editing message: {e}")
-        # Fallback: send new message
         try:
             return await safe_send_message(context, chat_id, text, reply_markup, parse_mode)
         except Exception as e2:
             logger.error(f"Error sending fallback message: {e2}")
             return None
 
-# ========== FOLDER INDEX MANAGEMENT ==========
 
 def save_folder_index(user_id, folders):
     """Save folder list with index for callback data"""
@@ -151,7 +143,6 @@ def get_folder_by_index(user_id, index):
         logger.error(f"Error getting folder by index: {e}")
         return None
 
-# ========== IMPROVED MEGA LOGIN SYSTEM ==========
 
 def setup_environment():
     """Setup environment untuk snap installation dengan path yang lengkap"""
@@ -528,86 +519,6 @@ def ensure_mega_session():
     logger.error("Failed to establish mega session")
     return False
 
-# <CHANGE> Improved parsing function to filter out ASCII art and banners
-def parse_mega_ls_output(output):
-    """
-    Parse mega-cmd ls output dengan filtering yang lebih ketat
-    untuk menghindari ASCII art, banner, dan non-folder lines
-    """
-    folders = []
-    
-    # Split by lines
-    lines = output.strip().split('\n')
-    
-    # Patterns to EXCLUDE (banner, ASCII art, system messages)
-    exclude_patterns = [
-        r'^[\s\-_=\*\+#]+$',  # Lines with only special chars (ASCII art borders)
-        r'^\s*MEGA\s*$',  # MEGA banner
-        r'^\s*MEGAcmd\s*$',  # MEGAcmd banner
-        r'.*https?://',  # URLs
-        r'.*www\.',  # Web addresses
-        r'^\s*\[',  # Lines starting with brackets (status messages)
-        r'Used:',  # Storage info
-        r'Total:',  # Storage info
-        r'Available:',  # Storage info
-        r'^\s*$',  # Empty lines
-        r'^\s*\d+\s*(bytes|KB|MB|GB|TB)',  # Size information
-        r'Welcome',  # Welcome messages
-        r'Version',  # Version info
-        r'Copyright',  # Copyright info
-        r'^\s*\|',  # Table borders
-        r'^\s*\+',  # Table borders
-        r'Command:',  # Command echoes
-        r'Logging',  # Login messages
-        r'Session',  # Session messages
-    ]
-    
-    # Compile patterns
-    exclude_regex = [re.compile(pattern, re.IGNORECASE) for pattern in exclude_patterns]
-    
-    for line in lines:
-        line = line.strip()
-        
-        # Skip empty lines
-        if not line or len(line) < 2:
-            continue
-        
-        # Check if line matches any exclude pattern
-        should_exclude = False
-        for pattern in exclude_regex:
-            if pattern.search(line):
-                should_exclude = True
-                break
-        
-        if should_exclude:
-            continue
-        
-        # Additional checks for valid folder names
-        # Folders typically don't have extensions or have common folder characteristics
-        
-        # Remove any leading/trailing special characters
-        cleaned_line = line.strip('[](){}|+-=*#_')
-        
-        if not cleaned_line:
-            continue
-        
-        # Check if it looks like a folder (no file extension or common folder patterns)
-        # Allow folders with spaces and special chars but filter out obvious non-folders
-        if (len(cleaned_line) > 0 and 
-            len(cleaned_line) < 255 and  # Reasonable folder name length
-            not cleaned_line.startswith('.') and  # Not hidden files
-            cleaned_line not in folders):  # No duplicates
-            
-            # Final validation: check if it contains mostly printable characters
-            printable_ratio = sum(c.isprintable() for c in cleaned_line) / len(cleaned_line)
-            if printable_ratio > 0.9:  # At least 90% printable characters
-                folders.append(cleaned_line)
-                logger.debug(f"Valid folder found: {cleaned_line}")
-    
-    return folders
-
-
-# ========== USER SETTINGS MANAGEMENT ==========
 
 def load_user_settings():
     """Load user settings from JSON file"""
@@ -647,7 +558,6 @@ def update_user_settings(user_id, new_settings):
     settings[str(user_id)] = {**get_user_settings(user_id), **new_settings}
     save_user_settings(settings)
 
-# ========== TERABOX SETTINGS MANAGEMENT ==========
 
 def update_terabox_settings(local_folder, remote_folder):
     """Update Terabox settings.json untuk folder tertentu"""
@@ -668,7 +578,6 @@ def update_terabox_settings(local_folder, remote_folder):
         logger.error(f"Error updating Terabox settings: {e}")
         return False
 
-# ========== CLEANUP FUNCTIONS ==========
 
 async def cleanup_after_upload(folder_path, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Hapus folder setelah upload selesai"""
@@ -722,7 +631,6 @@ def cleanup_old_downloads():
     except Exception as e:
         logger.error(f"Error in cleanup_old_downloads: {e}")
 
-# ========== HELPER FUNCTIONS ==========
 
 def get_folders_list(page=0, items_per_page=10):
     """Mendapatkan daftar folder dengan pagination"""
@@ -769,11 +677,86 @@ def safe_rename(old_path, new_path):
         logger.error(f"Rename failed {old_path} -> {new_path}: {e}")
         return False
 
-# ========== IMPROVED MEGA.NZ FUNCTIONS ==========
+def parse_mega_ls_output(output_text):
+    """
+    Parse mega-cmd ls output dengan filter yang sangat ketat
+    untuk menghindari ASCII art, banner, dan non-folder lines
+    """
+    if not output_text:
+        return []
+    
+    lines = output_text.strip().split('\n')
+    folders = []
+    
+    # Pattern untuk mendeteksi ASCII art dan banner
+    banner_patterns = [
+        r'^[=\-_*#]{3,}',  # Repeated special chars (===, ---, ___, ***, ###)
+        r'^[\s]*[=\-_*#]+[\s]*$',  # Lines with only special chars and spaces
+        r'https?://',  # URLs
+        r'mega\.nz',  # Mega.nz references
+        r'mega\.co\.nz',  # Mega.co.nz references
+        r'MEGA\s+CMD',  # MEGA CMD text
+        r'MEGA\s+Limited',  # Company name
+        r'Welcome\s+to',  # Welcome messages
+        r'^\s*\d+\s*(GB|MB|KB|TB)',  # Storage info (e.g., "50 GB")
+        r'Used:',  # Storage usage
+        r'Total:',  # Total storage
+        r'Available:',  # Available storage
+        r'^\s*\[',  # Lines starting with brackets
+        r'@.*\.com',  # Email addresses in banner
+        r'^\s*$',  # Empty lines
+        r'^[\W_]+$',  # Lines with only non-alphanumeric chars
+    ]
+    
+    compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in banner_patterns]
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Skip empty lines
+        if not line or len(line) < 2:
+            continue
+        
+        # Check against all banner patterns
+        is_banner = False
+        for pattern in compiled_patterns:
+            if pattern.search(line):
+                is_banner = True
+                logger.debug(f"Filtered out banner line: {line}")
+                break
+        
+        if is_banner:
+            continue
+        
+        # Additional checks for valid folder names
+        # Count alphanumeric vs special characters ratio
+        alphanumeric_count = sum(c.isalnum() or c.isspace() for c in line)
+        special_count = sum(not c.isalnum() and not c.isspace() for c in line)
+        
+        # If more than 40% special characters, likely not a folder name
+        if len(line) > 0 and (special_count / len(line)) > 0.4:
+            logger.debug(f"Filtered out (too many special chars): {line}")
+            continue
+        
+        # Check for repeated characters (like ====== or ------)
+        if re.search(r'(.)\1{4,}', line):  # Same char repeated 5+ times
+            logger.debug(f"Filtered out (repeated chars): {line}")
+            continue
+        
+        # Valid folder name should have at least some alphanumeric characters
+        if alphanumeric_count < 2:
+            logger.debug(f"Filtered out (not enough alphanumeric): {line}")
+            continue
+        
+        # If we got here, it's likely a valid folder name
+        if line not in folders:
+            folders.append(line)
+            logger.info(f"Valid folder found: {line}")
+    
+    return folders
 
-# <CHANGE> Completely rewritten list_mega_folders with better parsing
 async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List semua folder di akun Mega menggunakan mega-cmd dengan parsing yang lebih baik"""
+    """List semua folder di akun Mega menggunakan mega-cmd dengan parsing yang robust"""
     try:
         chat_id = update.effective_chat.id
         
@@ -810,36 +793,33 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await send_progress_message(chat_id, "📡 Mengambil daftar folder dari Mega.nz...", context)
         
-        # Try to get folder list with better error handling
+        # Try with -l flag first for structured output
         try:
             result = run_mega_command(['ls', '-l', '/'], timeout=60)
-        except subprocess.TimeoutExpired:
-            await send_progress_message(chat_id, "❌ Timeout: Gagal mengambil daftar folder (coba lagi)", context)
-            return
+            logger.info(f"mega-cmd ls -l output:\n{result.stdout}")
+        except Exception as e:
+            logger.warning(f"ls -l failed, trying without -l: {e}")
+            result = run_mega_command(['ls', '/'], timeout=60)
+            logger.info(f"mega-cmd ls output:\n{result.stdout}")
         
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
-            logger.error(f"mega-cmd ls failed: {error_msg}")
             await send_progress_message(chat_id, f"❌ Gagal mengambil daftar folder: {safe_html(error_msg[:100])}", context)
             return
         
-        # Use improved parsing function
-        logger.info(f"Raw mega-cmd output:\n{result.stdout}")
+        # Use the new robust parsing function
         folders = parse_mega_ls_output(result.stdout)
         
         if not folders:
-            # Try alternative command without -l flag
-            logger.info("No folders found with -l flag, trying without...")
-            try:
-                result = run_mega_command(['ls', '/'], timeout=60)
-                if result.returncode == 0:
-                    folders = parse_mega_ls_output(result.stdout)
-            except Exception as e:
-                logger.error(f"Alternative ls command failed: {e}")
-        
-        if not folders:
-            await send_progress_message(chat_id, "📭 Tidak ada folder di akun Mega.nz atau parsing gagal. Cek log untuk detail.", context)
-            logger.warning(f"No folders parsed from output:\n{result.stdout}")
+            await send_progress_message(
+                chat_id, 
+                "📭 Tidak ada folder di akun Mega.nz\n\n"
+                "Jika Anda yakin ada folder, coba:\n"
+                "1. <code>/logoutmega</code>\n"
+                "2. <code>/loginmega email password</code>\n"
+                "3. <code>/listmega</code>", 
+                context
+            )
             return
         
         # Save folder index for callback
@@ -847,13 +827,13 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Create keyboard with folder buttons
         keyboard = []
-        for idx, folder in enumerate(sorted(folders)[:30]):  # Limit to 30 folders
+        for idx, folder in enumerate(sorted(folders)[:30]):
             if folder and len(folder) > 0:
                 display_name = folder[:25] + "..." if len(folder) > 25 else folder
                 keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f"megadl_{idx}")])
         
         if not keyboard:
-            await send_progress_message(chat_id, "❌ Tidak ada folder valid yang ditemukan setelah filtering", context)
+            await send_progress_message(chat_id, "❌ Tidak ada folder valid yang ditemukan", context)
             return
             
         keyboard.append([InlineKeyboardButton("🔄 Refresh List", callback_data="refresh_mega_list")])
@@ -863,9 +843,9 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send_message(
             context,
             chat_id=chat_id,
-            text=f"📂 <b>Pilih folder dari Mega.nz untuk didownload</b>\n\n"
-                 f"✅ Ditemukan: <b>{len(folders)}</b> folder\n"
-                 f"📋 Menampilkan: <b>{min(30, len(folders))}</b> folder",
+            text=f"✅ <b>Ditemukan: {len(folders)} folder</b>\n"
+                 f"📂 <b>Menampilkan: {min(len(folders), 30)} folder</b>\n\n"
+                 f"Pilih folder dari <b>Mega.nz</b> untuk didownload:",
             reply_markup=reply_markup
         )
         
@@ -876,7 +856,8 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         error_msg = f"❌ Error mengambil daftar folder: {safe_html(str(e))}"
         await send_progress_message(chat_id, error_msg, context)
-        logger.error(f"List mega folders error: {e}", exc_info=True)
+        logger.error(f"List mega folders error: {e}")
+
 
 async def download_mega_folder(folder_name, job_id, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Download folder dari Mega.nz menggunakan mega-cmd"""
@@ -977,8 +958,6 @@ async def auto_rename_media_files(folder_path, prefix, update: Update, context: 
         logger.error(f"Auto rename error: {e}")
         return {'photos': 0, 'videos': 0}
 
-
-# ========== UPLOAD FUNCTIONS ==========
 
 async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Upload ke Terabox menggunakan CLI"""
@@ -1195,7 +1174,6 @@ async def process_auto_upload(folder_path, platform, update: Update, context: Co
     elif platform == 'doodstream':
         await upload_to_doodstream(folder_path, update, context)
 
-# ========== MEGA LOGIN/LOGOUT HANDLERS ==========
 
 async def loginmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /loginmega"""
@@ -1275,8 +1253,6 @@ async def logoutmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send_message(context, update.effective_chat.id, f"❌ Error saat logout: {safe_html(str(e))}")
         logger.error(f"Logout error: {e}")
 
-
-# ========== SETTINGS HANDLERS ==========
 
 async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /setprefix"""
@@ -1386,9 +1362,7 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await safe_send_message(context, update.effective_chat.id, settings_text)
 
-# ========== TELEGRAM BOT HANDLERS ==========
 
-# <CHANGE> Improved /start command with better status display
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /start"""
     mega_available = check_mega_cmd()
@@ -1396,51 +1370,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if mega_available and is_logged_in:
         mega_status = f"✅ {safe_html(login_msg)}"
-        mega_icon = "✅"
     elif mega_available:
         email, _ = load_mega_credentials()
         if email:
             mega_status = f"⚠️ Terinstall, credential tersimpan ({safe_html(email)})"
-            mega_icon = "⚠️"
         else:
             mega_status = "⚠️ Terinstall, belum login"
-            mega_icon = "⚠️"
     else:
         mega_status = "❌ Mega-cmd tidak terinstall"
-        mega_icon = "❌"
     
     welcome_text = f"""
 🤖 <b>Bot Download &amp; Upload Manager</b>
 
-{mega_icon} <b>Status Mega.nz:</b> {mega_status}
+<b>Status Mega.nz:</b> {mega_status}
 
-<b>✨ Fitur Utama:</b>
+<b>Fitur:</b>
 📥 Download folder dari Mega.nz
-🔄 Auto-rename file media (foto &amp; video)
+🔄 Auto-rename file media
 📤 Upload ke Terabox &amp; Doodstream
 ⚙️ Custom prefix &amp; auto-upload
 🧹 Auto-cleanup setelah upload
 
-<b>📋 Perintah Mega.nz:</b>
+<b>Perintah Utama:</b>
 /loginmega &lt;email&gt; &lt;password&gt; - Login Mega.nz
 /listmega - List folder Mega.nz
 /download &lt;folder&gt; - Download folder
-/logoutmega - Logout dari Mega.nz
-
-<b>📤 Perintah Upload:</b>
 /upload - Upload interaktif
-/setplatform - Pilih platform (terabox/doodstream)
-/autoupload - Toggle auto-upload
-
-<b>⚙️ Perintah Lainnya:</b>
 /mysettings - Lihat settings
 /status - Status sistem
-/cleanup - Bersihkan folder manual
-
-<b>💡 Tips:</b>
-• Login dulu dengan /loginmega sebelum /listmega
-• Gunakan /mysettings untuk cek status lengkap
-• Auto-upload akan upload otomatis setelah download
     """
     await safe_send_message(context, update.effective_chat.id, welcome_text)
 
@@ -1757,7 +1714,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await safe_send_message(context, update.effective_chat.id, f"❌ Job {safe_html(job_id)} tidak ditemukan")
 
-# ========== MAIN FUNCTION ===========
 
 def main():
     """Main function"""
