@@ -62,11 +62,11 @@ class AccountStatus(Enum):
 class AccountManager:
     def __init__(self):
         self.accounts_file = 'mega_accounts.json'
+        self.account_status = {}  # INISIALISASI DI SINI SEBELUM load_accounts
         self.accounts = self.load_accounts()
         self.current_account_index = 0
         self.processing = False
         self.lock = Lock()
-        self.account_status = {}
         self.current_platform = 'terabox'
         self.current_prefix = 'file_'
         
@@ -87,6 +87,9 @@ class AccountManager:
                 return accounts
         except FileNotFoundError:
             logger.error(f"File {self.accounts_file} tidak ditemukan!")
+            return []
+        except Exception as e:
+            logger.error(f"Error loading accounts: {e}")
             return []
     
     def save_accounts(self):
@@ -150,6 +153,9 @@ class MegaManager:
     
     def login_to_mega(self, email: str, password: str) -> Tuple[bool, str]:
         try:
+            # Logout dulu untuk memastikan session bersih
+            subprocess.run('mega-logout', shell=True, capture_output=True, text=True)
+            
             cmd = f'mega-login "{email}" "{password}"'
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
             
@@ -194,7 +200,7 @@ class MegaManager:
             
             result = subprocess.run('mega-ls', shell=True, capture_output=True, text=True)
             if result.returncode == 0:
-                folders = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+                folders = [line.strip() for line in result.stdout.split('\n') if line.strip() and not line.startswith('//')]
                 return True, folders
             else:
                 return False, [f"Error: {result.stderr}"]
@@ -209,13 +215,19 @@ class MegaManager:
             # Create download directory
             download_path.mkdir(parents=True, exist_ok=True)
             
-            cmd = f'mega-get /"{folder_name}" "{download_path}"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            # Escape folder name untuk handle spasi dan karakter khusus
+            escaped_folder_name = f'"{folder_name}"'
+            cmd = f'mega-get {escaped_folder_name} "{download_path}"'
+            
+            logger.info(f"Executing: {cmd}")
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
             
             if result.returncode == 0:
                 return True, f"Download {folder_name} berhasil!"
             else:
                 return False, f"Download gagal: {result.stderr}"
+        except subprocess.TimeoutExpired:
+            return False, "Download timeout (1 hour)"
         except Exception as e:
             return False, f"Error: {str(e)}"
 
@@ -249,7 +261,11 @@ class FileManager:
                     continue
                 
                 # Rename file
-                file_path.rename(new_path)
+                try:
+                    file_path.rename(new_path)
+                except Exception as e:
+                    logger.error(f"Error renaming {file_path}: {e}")
+                    continue
             
             return {'photos': photo_count, 'videos': video_count}
         except Exception as e:
@@ -530,7 +546,7 @@ class AccountProcessor:
         """Process single folder: download → rename → upload"""
         try:
             # Create download path
-            download_path = DOWNLOAD_BASE / f"account_{account_index}" / folder_name
+            download_path = DOWNLOAD_BASE / f"account_{account_index}" / f"folder_{folder_index}"
             
             # Download folder
             self.account_manager.update_account_status(
@@ -563,7 +579,7 @@ class AccountProcessor:
             
             # Update account status with rename counts
             status = self.account_manager.get_account_status(account_index)
-            status['files_renamed'] = rename_result['photos'] + rename_result['videos']
+            status['files_renamed'] += rename_result['photos'] + rename_result['videos']
             status['folders_downloaded'] += 1
             
             await self.send_progress(
@@ -626,11 +642,13 @@ class AccountProcessor:
         return True
 
 # Initialize managers
-account_manager = AccountManager()
-mega_manager = MegaManager()
-file_manager = FileManager()
-upload_manager = UploadManager()
-account_processor = AccountProcessor(account_manager, mega_manager, file_manager, upload_manager)
+def initialize_managers():
+    global account_manager, mega_manager, file_manager, upload_manager, account_processor
+    account_manager = AccountManager()
+    mega_manager = MegaManager()
+    file_manager = FileManager()
+    upload_manager = UploadManager()
+    account_processor = AccountProcessor(account_manager, mega_manager, file_manager, upload_manager)
 
 # Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -889,6 +907,9 @@ def main():
     """Start the bot"""
     # Create necessary directories
     DOWNLOAD_BASE.mkdir(exist_ok=True)
+    
+    # Initialize managers
+    initialize_managers()
     
     # Check Mega.nz installation
     if not mega_manager.check_mega_cmd():
