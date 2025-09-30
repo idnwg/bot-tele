@@ -10,9 +10,11 @@ import time
 import shutil
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.constants import ParseMode
 from pathlib import Path
 from queue import Queue
 from dotenv import load_dotenv
+import html
 
 # Load environment variables
 load_dotenv(os.path.join('/root/bot-tele', '.env'))
@@ -29,11 +31,14 @@ TERABOX_CLI = os.path.join(BASE_DIR, "teraboxcli", "main.py")
 TERABOX_SETTINGS = os.path.join(BASE_DIR, "teraboxcli", "settings.json")
 USER_SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 MEGA_CREDENTIALS_FILE = os.path.join(BASE_DIR, "mega.json")
+FOLDER_INDEX_FILE = os.path.join(BASE_DIR, "folder_index.json")
 
 # Antrian jobs
 download_queue = Queue()
 upload_queue = Queue()
 active_jobs = {}
+
+folder_cache = {}
 
 # Ekstensi file yang didukung untuk rename
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
@@ -50,12 +55,107 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ========== HELPER FUNCTIONS FOR SAFE MESSAGING ==========
+
+def escape_markdown(text):
+    """Escape special characters for MarkdownV2"""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+def safe_html(text):
+    """Escape HTML special characters"""
+    return html.escape(str(text))
+
+async def safe_send_message(context, chat_id, text, reply_markup=None, parse_mode=ParseMode.HTML):
+    """Safely send message with error handling"""
+    try:
+        return await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        # Fallback: send without formatting
+        try:
+            return await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=None
+            )
+        except Exception as e2:
+            logger.error(f"Error sending plain message: {e2}")
+            return None
+
+async def safe_edit_message(context, chat_id, message_id, text, reply_markup=None, parse_mode=ParseMode.HTML):
+    """Safely edit message with error handling"""
+    try:
+        return await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        # Fallback: send new message
+        try:
+            return await safe_send_message(context, chat_id, text, reply_markup, parse_mode)
+        except Exception as e2:
+            logger.error(f"Error sending fallback message: {e2}")
+            return None
+
+# ========== FOLDER INDEX MANAGEMENT ==========
+
+def save_folder_index(user_id, folders):
+    """Save folder list with index for callback data"""
+    try:
+        if os.path.exists(FOLDER_INDEX_FILE):
+            with open(FOLDER_INDEX_FILE, 'r') as f:
+                index_data = json.load(f)
+        else:
+            index_data = {}
+        
+        index_data[str(user_id)] = {
+            'folders': folders,
+            'timestamp': time.time()
+        }
+        
+        with open(FOLDER_INDEX_FILE, 'w') as f:
+            json.dump(index_data, f, indent=2)
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error saving folder index: {e}")
+        return False
+
+def get_folder_by_index(user_id, index):
+    """Get folder name by index"""
+    try:
+        if os.path.exists(FOLDER_INDEX_FILE):
+            with open(FOLDER_INDEX_FILE, 'r') as f:
+                index_data = json.load(f)
+            
+            user_data = index_data.get(str(user_id))
+            if user_data and 'folders' in user_data:
+                folders = user_data['folders']
+                if 0 <= index < len(folders):
+                    return folders[index]
+        return None
+    except Exception as e:
+        logger.error(f"Error getting folder by index: {e}")
+        return None
+
 # ========== IMPROVED MEGA LOGIN SYSTEM ==========
 
 def setup_environment():
     """Setup environment untuk snap installation dengan path yang lengkap"""
     try:
-        # <CHANGE> Tambahkan semua kemungkinan path untuk snap dan mega-cmd
         snap_paths = [
             '/snap/bin',
             '/var/lib/snapd/snap/bin',
@@ -75,7 +175,6 @@ def setup_environment():
         if new_paths:
             os.environ['PATH'] = f"{':'.join(new_paths)}:{current_path}"
         
-        # Set environment variables untuk MEGA
         mega_email = os.getenv('MEGA_EMAIL', '')
         mega_password = os.getenv('MEGA_PASSWORD', '')
         
@@ -92,7 +191,6 @@ def setup_environment():
 
 def find_mega_executable():
     """Find the correct mega-cmd executable path"""
-    # <CHANGE> Cari executable mega-cmd yang benar
     possible_paths = [
         'mega-cmd',
         '/snap/bin/mega-cmd',
@@ -115,7 +213,6 @@ def find_mega_executable():
         except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
             continue
     
-    # Fallback: try using 'which' command
     try:
         result = subprocess.run(['which', 'mega-cmd'], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and result.stdout.strip():
@@ -128,7 +225,6 @@ def find_mega_executable():
     logger.warning("mega-cmd executable not found, using 'mega-cmd' as default")
     return 'mega-cmd'
 
-# Global variable untuk menyimpan path mega-cmd
 MEGA_CMD_PATH = None
 
 def check_mega_cmd():
@@ -136,11 +232,8 @@ def check_mega_cmd():
     global MEGA_CMD_PATH
     try:
         setup_environment()
-        
-        # Find mega-cmd executable
         MEGA_CMD_PATH = find_mega_executable()
         
-        # Test mega-cmd dengan command sederhana
         try:
             result = subprocess.run(
                 [MEGA_CMD_PATH, '--version'],
@@ -154,7 +247,6 @@ def check_mega_cmd():
         except Exception as e:
             logger.debug(f"Version check failed: {e}")
         
-        # Alternative: cek dengan help command
         try:
             result = subprocess.run(
                 [MEGA_CMD_PATH, '--help'],
@@ -176,29 +268,20 @@ def check_mega_cmd():
         return False
 
 def run_mega_command(args, timeout=60, input_text=None):
-    """
-    Jalankan command mega-cmd dengan struktur yang benar
-    Args:
-        args: list of command arguments (e.g., ['login', 'email', 'password'])
-        timeout: command timeout in seconds
-        input_text: optional stdin input for interactive commands
-    """
+    """Jalankan command mega-cmd dengan struktur yang benar"""
     global MEGA_CMD_PATH
     
     try:
         if MEGA_CMD_PATH is None:
             MEGA_CMD_PATH = find_mega_executable()
         
-        # <CHANGE> Konstruksi command yang benar: mega-cmd <subcommand> <args>
         if isinstance(args, str):
             args = args.split()
         
-        # Build full command
         full_command = [MEGA_CMD_PATH] + args
         
         logger.info(f"Running mega command: {' '.join(full_command)}")
         
-        # Execute command
         if input_text:
             result = subprocess.run(
                 full_command,
@@ -234,14 +317,11 @@ def check_mega_login():
     """Check status login Mega.nz"""
     try:
         logger.info("Checking Mega.nz login status...")
-        
-        # <CHANGE> Gunakan 'whoami' subcommand yang benar
         result = run_mega_command(['whoami'], timeout=30)
         
         output = result.stdout.strip()
         error_output = result.stderr.strip().lower() if result.stderr else ""
         
-        # Check if logged in
         if result.returncode == 0 and output:
             if '@' in output and 'not logged in' not in output.lower():
                 logger.info(f"Logged in as: {output}")
@@ -249,11 +329,9 @@ def check_mega_login():
             elif output and 'not logged in' not in output.lower() and 'not' not in output.lower():
                 return True, f"Session active: {output}"
         
-        # Check error messages
         if 'not logged in' in output.lower() or 'not logged in' in error_output:
             return False, "Not logged in"
         
-        # Try alternative: list root directory
         try:
             result = run_mega_command(['ls'], timeout=30)
             if result.returncode == 0 and 'not logged in' not in result.stdout.lower():
@@ -267,6 +345,7 @@ def check_mega_login():
         logger.error(f"Error checking login: {e}")
         return False, f"Error: {str(e)}"
 
+
 def save_mega_credentials(email, password):
     """Simpan credential Mega ke file JSON"""
     try:
@@ -278,7 +357,6 @@ def save_mega_credentials(email, password):
         with open(MEGA_CREDENTIALS_FILE, 'w') as f:
             json.dump(credentials, f, indent=2)
         
-        # Also set as environment variables
         os.environ['MEGA_EMAIL'] = email
         os.environ['MEGA_PASSWORD'] = password
         
@@ -297,7 +375,6 @@ def load_mega_credentials():
                 email = credentials.get('email')
                 password = credentials.get('password')
                 
-                # Set as environment variables
                 if email:
                     os.environ['MEGA_EMAIL'] = email
                 if password:
@@ -315,7 +392,6 @@ def delete_mega_credentials():
         if os.path.exists(MEGA_CREDENTIALS_FILE):
             os.remove(MEGA_CREDENTIALS_FILE)
         
-        # Clear environment variables
         os.environ.pop('MEGA_EMAIL', None)
         os.environ.pop('MEGA_PASSWORD', None)
         
@@ -330,19 +406,17 @@ def login_to_mega(email, password):
     try:
         logger.info(f"Attempting login to Mega.nz for: {email}")
         
-        # <CHANGE> Method 1: Direct login dengan syntax yang benar
         try:
             logger.info("Trying direct login...")
             result = run_mega_command(['login', email, password], timeout=45)
             
             output_combined = (result.stdout + result.stderr).lower()
             
-            # Check for success indicators
             if (result.returncode == 0 or 
                 'logged in' in output_combined or 
                 'already logged in' in output_combined):
                 
-                time.sleep(3)  # Wait for session initialization
+                time.sleep(3)
                 is_logged_in, msg = check_mega_login()
                 
                 if is_logged_in:
@@ -352,7 +426,6 @@ def login_to_mega(email, password):
                     logger.info("Already logged in")
                     return True, "Already logged in"
             
-            # Check for specific errors
             if 'invalid' in output_combined or 'incorrect' in output_combined:
                 return False, "Invalid email or password"
             
@@ -363,7 +436,6 @@ def login_to_mega(email, password):
         except Exception as e:
             logger.warning(f"Direct login error: {e}")
         
-        # <CHANGE> Method 2: Logout first, then login
         try:
             logger.info("Trying logout then login...")
             run_mega_command(['logout'], timeout=10)
@@ -381,11 +453,9 @@ def login_to_mega(email, password):
         except Exception as e:
             logger.warning(f"Logout-login method error: {e}")
         
-        # <CHANGE> Method 3: Session file cleanup and retry
         try:
             logger.info("Trying session cleanup and login...")
             
-            # Clear session files
             session_paths = [
                 os.path.expanduser('~/.megaCmd'),
                 os.path.expanduser('~/.megacmd'),
@@ -414,7 +484,7 @@ def login_to_mega(email, password):
         except Exception as e:
             logger.warning(f"Session cleanup method error: {e}")
         
-        return False, "All login methods failed. Please check credentials or try manual login: mega-cmd login email password"
+        return False, "All login methods failed. Please check credentials"
         
     except Exception as e:
         logger.error(f"Login process error: {e}")
@@ -428,13 +498,11 @@ def ensure_mega_session():
         try:
             logger.info(f"Checking mega session (attempt {attempt + 1}/{max_retries})...")
             
-            # Check if already logged in
             is_logged_in, login_msg = check_mega_login()
             if is_logged_in:
                 logger.info(f"Mega session valid: {login_msg}")
                 return True
             
-            # Try to login with saved credentials
             email, password = load_mega_credentials()
             if email and password:
                 logger.info(f"Attempting auto-login for: {email}")
@@ -449,7 +517,6 @@ def ensure_mega_session():
                 logger.warning("No saved credentials found")
                 break
             
-            # Wait before retry
             if attempt < max_retries - 1:
                 time.sleep(5)
                 
@@ -461,7 +528,6 @@ def ensure_mega_session():
     logger.error("Failed to establish mega session")
     return False
 
-# ... existing code ...
 
 # ========== USER SETTINGS MANAGEMENT ==========
 
@@ -538,7 +604,7 @@ async def cleanup_after_upload(folder_path, update: Update, context: ContextType
         if os.path.exists(folder_path):
             folder_name = os.path.basename(folder_path)
             shutil.rmtree(folder_path)
-            await send_progress_message(chat_id, f"🧹 Folder berhasil dihapus: {folder_name}", context)
+            await send_progress_message(chat_id, f"🧹 Folder berhasil dihapus: {safe_html(folder_name)}", context)
             logger.info(f"Cleanup completed: {folder_path}")
             return True
         else:
@@ -546,7 +612,7 @@ async def cleanup_after_upload(folder_path, update: Update, context: ContextType
             return False
             
     except Exception as e:
-        error_msg = f"❌ Gagal menghapus folder: {str(e)}"
+        error_msg = f"❌ Gagal menghapus folder: {safe_html(str(e))}"
         await send_progress_message(update.effective_chat.id, error_msg, context)
         logger.error(f"Cleanup error: {e}")
         return False
@@ -555,7 +621,7 @@ def cleanup_old_downloads():
     """Bersihkan folder download yang sudah lama"""
     try:
         current_time = time.time()
-        cleanup_threshold = 24 * 3600  # 24 jam
+        cleanup_threshold = 24 * 3600
         
         folders_to_remove = []
         for folder_name in os.listdir(DOWNLOADS_DIR):
@@ -599,17 +665,20 @@ async def send_progress_message(chat_id, message, context):
     try:
         if 'progress_msg_id' in context.user_data:
             try:
-                await context.bot.edit_message_text(
+                await safe_edit_message(
+                    context,
                     chat_id=chat_id,
                     message_id=context.user_data['progress_msg_id'],
                     text=message
                 )
             except:
-                msg = await context.bot.send_message(chat_id=chat_id, text=message)
-                context.user_data['progress_msg_id'] = msg.message_id
+                msg = await safe_send_message(context, chat_id=chat_id, text=message)
+                if msg:
+                    context.user_data['progress_msg_id'] = msg.message_id
         else:
-            msg = await context.bot.send_message(chat_id=chat_id, text=message)
-            context.user_data['progress_msg_id'] = msg.message_id
+            msg = await safe_send_message(context, chat_id=chat_id, text=message)
+            if msg:
+                context.user_data['progress_msg_id'] = msg.message_id
     except Exception as e:
         logger.error(f"Error sending progress: {e}")
 
@@ -630,11 +699,13 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         
         if not check_mega_cmd():
-            await update.message.reply_text(
-                "❌ **Mega-cmd tidak ditemukan!**\n\n"
+            await safe_send_message(
+                context,
+                chat_id,
+                "❌ <b>Mega-cmd tidak ditemukan!</b>\n\n"
                 "Untuk instalasi:\n"
-                "1. `sudo snap install mega-cmd`\n"
-                "2. Atau: `sudo apt install megacmd`\n"
+                "1. <code>sudo snap install mega-cmd</code>\n"
+                "2. Atau: <code>sudo apt install megacmd</code>\n"
                 "3. Restart bot setelah install"
             )
             return
@@ -648,23 +719,23 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await context.bot.send_message(
+            await safe_send_message(
+                context,
                 chat_id=chat_id,
-                text="❌ **Tidak dapat terhubung ke Mega.nz!**\n\n"
+                text="❌ <b>Tidak dapat terhubung ke Mega.nz!</b>\n\n"
                      "Silakan login dengan:\n"
-                     "`/loginmega email password`",
+                     "<code>/loginmega email password</code>",
                 reply_markup=reply_markup
             )
             return
         
         await send_progress_message(chat_id, "📡 Mengambil daftar folder dari Mega.nz...", context)
         
-        # <CHANGE> List folders menggunakan 'ls' subcommand yang benar
         result = run_mega_command(['ls', '/'], timeout=60)
         
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
-            await send_progress_message(chat_id, f"❌ Gagal mengambil daftar folder: {error_msg[:100]}", context)
+            await send_progress_message(chat_id, f"❌ Gagal mengambil daftar folder: {safe_html(error_msg[:100])}", context)
             return
         
         lines = result.stdout.strip().split('\n')
@@ -672,7 +743,6 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for line in lines:
             line = line.strip()
-            # Filter out non-folder lines
             if (line and 
                 not line.startswith('[') and 
                 not line.startswith('Used') and 
@@ -681,7 +751,6 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 '://' not in line and
                 len(line) > 1):
                 
-                # Simple heuristic: folders usually don't have extensions or have spaces
                 if '.' not in line or ' ' in line or '/' in line:
                     if line and line not in folders:
                         folders.append(line)
@@ -690,12 +759,13 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_progress_message(chat_id, "📭 Tidak ada folder di akun Mega.nz", context)
             return
         
-        # Buat keyboard untuk pilihan folder
+        save_folder_index(chat_id, folders)
+        
         keyboard = []
-        for folder in sorted(folders)[:30]:
+        for idx, folder in enumerate(sorted(folders)[:30]):
             if folder and len(folder) > 0:
-                display_name = folder[:30] + "..." if len(folder) > 30 else folder
-                keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f"megadl_{folder}")])
+                display_name = folder[:25] + "..." if len(folder) > 25 else folder
+                keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f"megadl_{idx}")])
         
         if not keyboard:
             await send_progress_message(chat_id, "❌ Tidak ada folder valid yang ditemukan", context)
@@ -705,7 +775,8 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await context.bot.send_message(
+        await safe_send_message(
+            context,
             chat_id=chat_id,
             text=f"📂 Pilih folder dari Mega.nz untuk didownload ({len(folders)} folder ditemukan):",
             reply_markup=reply_markup
@@ -716,7 +787,7 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except subprocess.TimeoutExpired:
         await send_progress_message(chat_id, "❌ Timeout: Gagal mengambil daftar folder", context)
     except Exception as e:
-        error_msg = f"❌ Error mengambil daftar folder: {str(e)}"
+        error_msg = f"❌ Error mengambil daftar folder: {safe_html(str(e))}"
         await send_progress_message(chat_id, error_msg, context)
         logger.error(f"List mega folders error: {e}")
 
@@ -731,24 +802,20 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
             await send_progress_message(chat_id, "❌ Session Mega.nz tidak valid. Silakan login ulang.", context)
             return
         
-        await send_progress_message(chat_id, f"📥 Memulai download folder: {folder_name}", context)
+        await send_progress_message(chat_id, f"📥 Memulai download folder: {safe_html(folder_name)}", context)
         
-        # Create target directory
         target_path = os.path.join(DOWNLOADS_DIR, folder_name)
         os.makedirs(target_path, exist_ok=True)
         
         await send_progress_message(chat_id, f"⏳ Download dalam proses... Ini mungkin butuh waktu lama.", context)
         
         try:
-            # <CHANGE> Download menggunakan 'get' subcommand yang benar
-            # Syntax: mega-cmd get <remote_path> <local_path>
             result = run_mega_command(['get', f'/{folder_name}', target_path], timeout=10800)
             
             if result.returncode != 0:
                 error_msg = result.stderr if result.stderr else result.stdout
                 logger.error(f"Download failed: {error_msg}")
                 
-                # Retry once after re-authentication
                 await send_progress_message(chat_id, "🔄 Mencoba login ulang dan download lagi...", context)
                 if ensure_mega_session():
                     result = run_mega_command(['get', f'/{folder_name}', target_path], timeout=10800)
@@ -759,9 +826,8 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         except subprocess.TimeoutExpired:
             await send_progress_message(chat_id, "⏰ Download timeout, checking hasil...", context)
         
-        await send_progress_message(chat_id, f"✅ Download selesai: {folder_name}", context)
+        await send_progress_message(chat_id, f"✅ Download selesai: {safe_html(folder_name)}", context)
         
-        # Auto rename files
         await send_progress_message(chat_id, f"🔄 Memulai rename file media...", context)
         rename_results = await auto_rename_media_files(target_path, user_settings['prefix'], update, context)
         
@@ -772,7 +838,6 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
             context
         )
         
-        # Auto upload if enabled
         if user_settings.get('auto_upload', False):
             platform = user_settings.get('platform', 'terabox')
             await send_progress_message(chat_id, f"📤 Auto-upload ke {platform}...", context)
@@ -781,7 +846,7 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         logger.info(f"Mega folder download completed: {folder_name}")
         
     except Exception as e:
-        error_msg = f"❌ Gagal download folder: {str(e)}"
+        error_msg = f"❌ Gagal download folder: {safe_html(str(e))}"
         await send_progress_message(update.effective_chat.id, error_msg, context)
         logger.error(f"Mega folder download failed: {e}")
 
@@ -794,7 +859,6 @@ async def auto_rename_media_files(folder_path, prefix, update: Update, context: 
         def sync_rename():
             nonlocal photo_count, video_count
             for root, dirs, files in os.walk(folder_path):
-                # Process photos
                 photo_files = [f for f in files 
                              if os.path.splitext(f)[1].lower() in PHOTO_EXTENSIONS]
                 for i, filename in enumerate(sorted(photo_files), 1):
@@ -806,7 +870,6 @@ async def auto_rename_media_files(folder_path, prefix, update: Update, context: 
                     if safe_rename(old_path, new_path):
                         photo_count += 1
                 
-                # Process videos
                 video_files = [f for f in files 
                              if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS]
                 for i, filename in enumerate(sorted(video_files), 1):
@@ -827,6 +890,7 @@ async def auto_rename_media_files(folder_path, prefix, update: Update, context: 
         logger.error(f"Auto rename error: {e}")
         return {'photos': 0, 'videos': 0}
 
+
 # ========== UPLOAD FUNCTIONS ==========
 
 async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -835,14 +899,13 @@ async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.D
         chat_id = update.effective_chat.id
         folder_name = os.path.basename(folder_path)
         
-        await send_progress_message(chat_id, f"📤 Upload ke Terabox: {folder_name}", context)
+        await send_progress_message(chat_id, f"📤 Upload ke Terabox: {safe_html(folder_name)}", context)
         
         remote_folder = f"/MegaUploads/{folder_name}"
         if not update_terabox_settings(folder_path, remote_folder):
             await send_progress_message(chat_id, "❌ Gagal update settings Terabox", context)
             return
         
-        # Collect media files
         media_files = []
         for root, dirs, files in os.walk(folder_path):
             for file in files:
@@ -865,7 +928,7 @@ async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.D
             try:
                 await send_progress_message(chat_id, 
                     f"📤 Progress: {i}/{total_files}\n"
-                    f"🔄 Upload: {os.path.basename(file_path)}", 
+                    f"🔄 Upload: {safe_html(os.path.basename(file_path))}", 
                     context
                 )
                 
@@ -894,25 +957,24 @@ async def upload_to_terabox(folder_path, update: Update, context: ContextTypes.D
                 logger.error(f"Error uploading {file_path} to Terabox: {e}")
         
         message = f"✅ Upload Terabox selesai!\n"
-        message += f"📁 Folder: {folder_name}\n"
+        message += f"📁 Folder: {safe_html(folder_name)}\n"
         message += f"📊 Hasil: {success_count} sukses, {failed_count} gagal\n"
         
         if uploaded_links:
             message += f"\n📎 Contoh links ({min(3, len(uploaded_links))} dari {len(uploaded_links)}):\n"
             for link in uploaded_links[:3]:
-                message += f"🔗 {link}\n"
+                message += f"🔗 {safe_html(link)}\n"
         
         await send_progress_message(chat_id, message, context)
         logger.info(f"Terabox upload completed: {success_count}/{total_files} files")
         
-        # Auto cleanup
         user_settings = get_user_settings(chat_id)
         if success_count > 0 and (user_settings.get('auto_cleanup', True) or AUTO_CLEANUP):
             await send_progress_message(chat_id, "🧹 Membersihkan folder lokal...", context)
             await cleanup_after_upload(folder_path, update, context)
             
     except Exception as e:
-        error_msg = f"❌ Error upload Terabox: {str(e)}"
+        error_msg = f"❌ Error upload Terabox: {safe_html(str(e))}"
         await send_progress_message(update.effective_chat.id, error_msg, context)
         logger.error(f"Terabox upload error: {e}")
 
@@ -922,7 +984,7 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
         chat_id = update.effective_chat.id
         folder_name = os.path.basename(folder_path)
         
-        await send_progress_message(chat_id, f"📤 Upload ke Doodstream: {folder_name}", context)
+        await send_progress_message(chat_id, f"📤 Upload ke Doodstream: {safe_html(folder_name)}", context)
         
         video_files = []
         for root, dirs, files in os.walk(folder_path):
@@ -944,7 +1006,7 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
             try:
                 await send_progress_message(chat_id, 
                     f"📤 Progress: {i}/{total_files}\n"
-                    f"🔄 Upload: {os.path.basename(file_path)}", 
+                    f"🔄 Upload: {safe_html(os.path.basename(file_path))}", 
                     context
                 )
                 
@@ -961,24 +1023,23 @@ async def upload_to_doodstream(folder_path, update: Update, context: ContextType
         
         if uploaded_links:
             message = f"✅ Upload Doodstream selesai!\n"
-            message += f"📁 Folder: {folder_name}\n"
+            message += f"📁 Folder: {safe_html(folder_name)}\n"
             message += f"📹 Video: {success_count} berhasil\n"
             message += f"\n📎 Links ({min(3, len(uploaded_links))} dari {len(uploaded_links)}):\n"
             for link in uploaded_links[:3]:
-                message += f"🔗 {link}\n"
+                message += f"🔗 {safe_html(link)}\n"
             
             await send_progress_message(chat_id, message, context)
         else:
             await send_progress_message(chat_id, "❌ Tidak ada video yang berhasil diupload", context)
         
-        # Auto cleanup
         user_settings = get_user_settings(chat_id)
         if success_count > 0 and (user_settings.get('auto_cleanup', True) or AUTO_CLEANUP):
             await send_progress_message(chat_id, "🧹 Membersihkan folder lokal...", context)
             await cleanup_after_upload(folder_path, update, context)
             
     except Exception as e:
-        error_msg = f"❌ Error upload Doodstream: {str(e)}"
+        error_msg = f"❌ Error upload Doodstream: {safe_html(str(e))}"
         await send_progress_message(update.effective_chat.id, error_msg, context)
         logger.error(f"Doodstream upload error: {e}")
 
@@ -1052,76 +1113,92 @@ async def process_auto_upload(folder_path, platform, update: Update, context: Co
 async def loginmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /loginmega"""
     if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "❌ Format: /loginmega <email> <password>\n"
-            "Contoh: /loginmega myemail@example.com mypassword123"
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            "❌ Format: <code>/loginmega &lt;email&gt; &lt;password&gt;</code>\n"
+            "Contoh: <code>/loginmega myemail@example.com mypassword123</code>"
         )
         return
     
     email = context.args[0]
     password = ' '.join(context.args[1:])
     
-    progress_msg = await update.message.reply_text("🔐 Mencoba login ke Mega.nz...")
+    progress_msg = await safe_send_message(context, update.effective_chat.id, "🔐 Mencoba login ke Mega.nz...")
     
     if save_mega_credentials(email, password):
-        await progress_msg.edit_text("🔐 Credential tersimpan, mencoba login...")
+        if progress_msg:
+            await safe_edit_message(context, update.effective_chat.id, progress_msg.message_id, "🔐 Credential tersimpan, mencoba login...")
         
         login_success, login_result = login_to_mega(email, password)
         
         if login_success:
-            await progress_msg.edit_text(
-                f"✅ **Login berhasil!**\n\n"
-                f"Email: `{email}`\n"
-                f"Status: {login_result}\n\n"
+            msg = (
+                f"✅ <b>Login berhasil!</b>\n\n"
+                f"Email: <code>{safe_html(email)}</code>\n"
+                f"Status: {safe_html(login_result)}\n\n"
                 f"Sekarang Anda bisa menggunakan:\n"
-                f"• `/listmega` - Lihat folder\n"
-                f"• `/download folder_name` - Download folder"
+                f"• <code>/listmega</code> - Lihat folder\n"
+                f"• <code>/download folder_name</code> - Download folder"
             )
         else:
-            await progress_msg.edit_text(
-                f"⚠️ **Login gagal**\n\n"
-                f"Error: {login_result}\n\n"
+            msg = (
+                f"⚠️ <b>Login gagal</b>\n\n"
+                f"Error: {safe_html(login_result)}\n\n"
                 f"Credential sudah disimpan. Coba:\n"
                 f"1. Periksa email dan password\n"
                 f"2. Login manual di VPS:\n"
-                f"`mega-cmd login {email} your_password`\n"
-                f"3. Kemudian coba `/listmega`"
+                f"<code>mega-cmd login {safe_html(email)} your_password</code>\n"
+                f"3. Kemudian coba <code>/listmega</code>"
             )
+        
+        if progress_msg:
+            await safe_edit_message(context, update.effective_chat.id, progress_msg.message_id, msg)
     else:
-        await progress_msg.edit_text("❌ Gagal menyimpan credential")
+        if progress_msg:
+            await safe_edit_message(context, update.effective_chat.id, progress_msg.message_id, "❌ Gagal menyimpan credential")
 
 async def logoutmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /logoutmega"""
     try:
-        progress_msg = await update.message.reply_text("🔐 Mencoba logout dari Mega.nz...")
+        progress_msg = await safe_send_message(context, update.effective_chat.id, "🔐 Mencoba logout dari Mega.nz...")
         
         try:
             run_mega_command(['logout'], timeout=10)
-            await progress_msg.edit_text("✅ Logout command berhasil")
+            if progress_msg:
+                await safe_edit_message(context, update.effective_chat.id, progress_msg.message_id, "✅ Logout command berhasil")
         except Exception as e:
-            await progress_msg.edit_text(f"⚠️ Logout command gagal: {e}")
+            if progress_msg:
+                await safe_edit_message(context, update.effective_chat.id, progress_msg.message_id, f"⚠️ Logout command gagal: {safe_html(str(e))}")
         
         delete_mega_credentials()
         
-        await progress_msg.edit_text(
-            "✅ **Logout berhasil!**\n\n"
-            "Credential Mega.nz telah dihapus.\n"
-            "Gunakan `/loginmega email password` untuk login kembali."
-        )
+        if progress_msg:
+            await safe_edit_message(
+                context,
+                update.effective_chat.id,
+                progress_msg.message_id,
+                "✅ <b>Logout berhasil!</b>\n\n"
+                "Credential Mega.nz telah dihapus.\n"
+                "Gunakan <code>/loginmega email password</code> untuk login kembali."
+            )
         logger.info("Mega.nz logout completed")
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error saat logout: {str(e)}")
+        await safe_send_message(context, update.effective_chat.id, f"❌ Error saat logout: {safe_html(str(e))}")
         logger.error(f"Logout error: {e}")
+
 
 # ========== SETTINGS HANDLERS ==========
 
 async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /setprefix"""
     if not context.args:
-        await update.message.reply_text(
-            "❌ Format: /setprefix <prefix>\n"
-            "Contoh: /setprefix vacation_"
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            "❌ Format: <code>/setprefix &lt;prefix&gt;</code>\n"
+            "Contoh: <code>/setprefix vacation_</code>"
         )
         return
     
@@ -1129,19 +1206,21 @@ async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if len(prefix) > 20:
-        await update.message.reply_text("❌ Prefix terlalu panjang (max 20 karakter)")
+        await safe_send_message(context, update.effective_chat.id, "❌ Prefix terlalu panjang (max 20 karakter)")
         return
     
     update_user_settings(user_id, {'prefix': prefix})
-    await update.message.reply_text(f"✅ Prefix berhasil diatur ke: `{prefix}`", parse_mode='Markdown')
+    await safe_send_message(context, update.effective_chat.id, f"✅ Prefix berhasil diatur ke: <code>{safe_html(prefix)}</code>")
     logger.info(f"User {user_id} set prefix to: {prefix}")
 
 async def setplatform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /setplatform"""
     if not context.args or context.args[0].lower() not in ['terabox', 'doodstream']:
-        await update.message.reply_text(
-            "❌ Format: /setplatform <terabox|doodstream>\n"
-            "Contoh: /setplatform terabox"
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            "❌ Format: <code>/setplatform &lt;terabox|doodstream&gt;</code>\n"
+            "Contoh: <code>/setplatform terabox</code>"
         )
         return
     
@@ -1149,7 +1228,7 @@ async def setplatform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     update_user_settings(user_id, {'platform': platform})
-    await update.message.reply_text(f"✅ Platform upload berhasil diatur ke: **{platform}**", parse_mode='Markdown')
+    await safe_send_message(context, update.effective_chat.id, f"✅ Platform upload berhasil diatur ke: <b>{platform}</b>")
     logger.info(f"User {user_id} set platform to: {platform}")
 
 async def autoupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1161,9 +1240,11 @@ async def autoupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_settings(user_id, {'auto_upload': new_auto_upload})
     
     status = "AKTIF ✅" if new_auto_upload else "NONAKTIF ❌"
-    await update.message.reply_text(
-        f"✅ Auto-upload berhasil diatur ke: **{status}**\n"
-        f"Platform: **{current_settings.get('platform', 'terabox')}**"
+    await safe_send_message(
+        context,
+        update.effective_chat.id,
+        f"✅ Auto-upload berhasil diatur ke: <b>{status}</b>\n"
+        f"Platform: <b>{current_settings.get('platform', 'terabox')}</b>"
     )
     logger.info(f"User {user_id} set auto_upload to: {new_auto_upload}")
 
@@ -1176,7 +1257,7 @@ async def autocleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_settings(user_id, {'auto_cleanup': new_auto_cleanup})
     
     status = "AKTIF ✅" if new_auto_cleanup else "NONAKTIF ❌"
-    await update.message.reply_text(f"✅ Auto-cleanup berhasil diatur ke: **{status}**")
+    await safe_send_message(context, update.effective_chat.id, f"✅ Auto-cleanup berhasil diatur ke: <b>{status}</b>")
     logger.info(f"User {user_id} set auto_cleanup to: {new_auto_cleanup}")
 
 async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1188,27 +1269,27 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_logged_in, login_msg = check_mega_login()
     
     if mega_available and is_logged_in:
-        mega_status = f"✅ {login_msg}"
+        mega_status = f"✅ {safe_html(login_msg)}"
     elif mega_available:
         email, _ = load_mega_credentials()
         if email:
-            mega_status = f"⚠️ Credential tersimpan ({email}), belum login"
+            mega_status = f"⚠️ Credential tersimpan ({safe_html(email)}), belum login"
         else:
             mega_status = "⚠️ Mega-cmd terinstall, belum login"
     else:
         mega_status = "❌ Mega-cmd tidak terinstall"
     
     settings_text = f"""
-⚙️ **Settings Anda**
+⚙️ <b>Settings Anda</b>
 
-📛 Prefix: `{settings.get('prefix', 'file_')}`
-📤 Platform: **{settings.get('platform', 'terabox').upper()}**
-🔄 Auto-upload: **{'AKTIF ✅' if settings.get('auto_upload', False) else 'NONAKTIF ❌'}**
-🧹 Auto-cleanup: **{'AKTIF ✅' if settings.get('auto_cleanup', True) else 'NONAKTIF ❌'}**
+📛 Prefix: <code>{safe_html(settings.get('prefix', 'file_'))}</code>
+📤 Platform: <b>{settings.get('platform', 'terabox').upper()}</b>
+🔄 Auto-upload: <b>{'AKTIF ✅' if settings.get('auto_upload', False) else 'NONAKTIF ❌'}</b>
+🧹 Auto-cleanup: <b>{'AKTIF ✅' if settings.get('auto_cleanup', True) else 'NONAKTIF ❌'}</b>
 
-**Status Mega.nz:** {mega_status}
+<b>Status Mega.nz:</b> {mega_status}
 
-**Perintah:**
+<b>Perintah:</b>
 /setprefix - Atur prefix rename
 /setplatform - Atur platform upload
 /autoupload - Toggle auto-upload
@@ -1216,7 +1297,7 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /loginmega - Login ke Mega.nz
 /listmega - List folder Mega.nz
     """
-    await update.message.reply_text(settings_text, parse_mode='Markdown')
+    await safe_send_message(context, update.effective_chat.id, settings_text)
 
 # ========== TELEGRAM BOT HANDLERS ==========
 
@@ -1226,37 +1307,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_logged_in, login_msg = check_mega_login()
     
     if mega_available and is_logged_in:
-        mega_status = f"✅ {login_msg}"
+        mega_status = f"✅ {safe_html(login_msg)}"
     elif mega_available:
         email, _ = load_mega_credentials()
         if email:
-            mega_status = f"⚠️ Terinstall, credential tersimpan ({email})"
+            mega_status = f"⚠️ Terinstall, credential tersimpan ({safe_html(email)})"
         else:
             mega_status = "⚠️ Terinstall, belum login"
     else:
         mega_status = "❌ Mega-cmd tidak terinstall"
     
     welcome_text = f"""
-🤖 **Bot Download & Upload Manager**
+🤖 <b>Bot Download &amp; Upload Manager</b>
 
-**Status Mega.nz:** {mega_status}
+<b>Status Mega.nz:</b> {mega_status}
 
-**Fitur:**
+<b>Fitur:</b>
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media
-📤 Upload ke Terabox & Doodstream
-⚙️ Custom prefix & auto-upload
+📤 Upload ke Terabox &amp; Doodstream
+⚙️ Custom prefix &amp; auto-upload
 🧹 Auto-cleanup setelah upload
 
-**Perintah Utama:**
-/loginmega <email> <password> - Login Mega.nz
+<b>Perintah Utama:</b>
+/loginmega &lt;email&gt; &lt;password&gt; - Login Mega.nz
 /listmega - List folder Mega.nz
-/download <folder> - Download folder
+/download &lt;folder&gt; - Download folder
 /upload - Upload interaktif
 /mysettings - Lihat settings
 /status - Status sistem
     """
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await safe_send_message(context, update.effective_chat.id, welcome_text)
 
 async def listmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /listmega"""
@@ -1265,7 +1346,7 @@ async def listmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /download"""
     if not context.args:
-        await update.message.reply_text("❌ Format: /download folder_name")
+        await safe_send_message(context, update.effective_chat.id, "❌ Format: <code>/download folder_name</code>")
         return
     
     folder_name = context.args[0]
@@ -1279,7 +1360,11 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     
     active_jobs[job_id] = 'download'
-    await update.message.reply_text(f"✅ Ditambahkan ke antrian download\nFolder: `{folder_name}`\nJob ID: `{job_id}`", parse_mode='Markdown')
+    await safe_send_message(
+        context,
+        update.effective_chat.id,
+        f"✅ Ditambahkan ke antrian download\nFolder: <code>{safe_html(folder_name)}</code>\nJob ID: <code>{job_id}</code>"
+    )
     
     asyncio.create_task(process_download_queue())
 
@@ -1299,7 +1384,7 @@ async def process_download_queue():
 async def rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /rename"""
     if len(context.args) != 2:
-        await update.message.reply_text("❌ Format: /rename old_name new_name")
+        await safe_send_message(context, update.effective_chat.id, "❌ Format: <code>/rename old_name new_name</code>")
         return
     
     old_name, new_name = context.args
@@ -1308,10 +1393,10 @@ async def rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         os.rename(old_path, new_path)
-        await update.message.reply_text(f"✅ Berhasil rename: {old_name} → {new_name}")
+        await safe_send_message(context, update.effective_chat.id, f"✅ Berhasil rename: {safe_html(old_name)} → {safe_html(new_name)}")
         logger.info(f"Renamed {old_name} to {new_name}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Gagal rename: {str(e)}")
+        await safe_send_message(context, update.effective_chat.id, f"❌ Gagal rename: {safe_html(str(e))}")
         logger.error(f"Rename failed: {e}")
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1319,12 +1404,13 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     folders, total_folders, current_page = get_folders_list()
     
     if not folders:
-        await update.message.reply_text("❌ Tidak ada folder di downloads/")
+        await safe_send_message(context, update.effective_chat.id, "❌ Tidak ada folder di downloads/")
         return
     
     keyboard = []
     for folder in folders:
-        keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"select_{folder}")])
+        display_name = folder[:20] + "..." if len(folder) > 20 else folder
+        keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f"select_{folder[:30]}")])
     
     nav_buttons = []
     if current_page > 0:
@@ -1336,7 +1422,9 @@ async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(nav_buttons)
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
+    await safe_send_message(
+        context,
+        update.effective_chat.id,
         f"📂 Pilih folder untuk diupload (Halaman {current_page + 1}):",
         reply_markup=reply_markup
     )
@@ -1354,7 +1442,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         for folder in folders:
-            keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"select_{folder}")])
+            display_name = folder[:20] + "..." if len(folder) > 20 else folder
+            keyboard.append([InlineKeyboardButton(f"📁 {display_name}", callback_data=f"select_{folder[:30]}")])
         
         nav_buttons = []
         if page > 0:
@@ -1366,7 +1455,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append(nav_buttons)
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await safe_edit_message(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
             f"📂 Pilih folder untuk diupload (Halaman {page + 1}):",
             reply_markup=reply_markup
         )
@@ -1377,21 +1469,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [
             [
-                InlineKeyboardButton("📤 Terabox", callback_data=f"target_terabox_{folder_name}"),
-                InlineKeyboardButton("🎬 Doodstream", callback_data=f"target_doodstream_{folder_name}")
+                InlineKeyboardButton("📤 Terabox", callback_data=f"target_terabox_{folder_name[:25]}"),
+                InlineKeyboardButton("🎬 Doodstream", callback_data=f"target_doodstream_{folder_name[:25]}")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            f"📁 Folder: {folder_name}\nPilih target upload:",
+        await safe_edit_message(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            f"📁 Folder: {safe_html(folder_name)}\nPilih target upload:",
             reply_markup=reply_markup
         )
     
     elif data.startswith("target_"):
-        target, folder_name = data.split("_", 2)[1:]
+        parts = data.split("_", 2)
+        if len(parts) >= 3:
+            target = parts[1]
+            folder_name = parts[2]
+        else:
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, "❌ Error: Invalid callback data")
+            return
+            
         folder_path = os.path.join(DOWNLOADS_DIR, folder_name)
         
-        await query.edit_message_text(f"✅ Memulai upload {target}: {folder_name}")
+        await safe_edit_message(context, query.message.chat_id, query.message.message_id, f"✅ Memulai upload {target}: {safe_html(folder_name)}")
         
         if target == "terabox":
             await upload_to_terabox(folder_path, update, context)
@@ -1399,34 +1501,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await upload_to_doodstream(folder_path, update, context)
     
     elif data.startswith("megadl_"):
-        folder_name = data.split("_", 1)[1]
-        job_id = f"megadl_{query.id}"
-        
-        await query.edit_message_text(f"✅ Menambahkan ke antrian download: {folder_name}")
-        
-        download_queue.put({
-            'job_id': job_id,
-            'folder_name': folder_name,
-            'update': update,
-            'context': context
-        })
-        active_jobs[job_id] = 'download'
-        
-        asyncio.create_task(process_download_queue())
+        try:
+            folder_index = int(data.split("_")[1])
+            folder_name = get_folder_by_index(query.from_user.id, folder_index)
+            
+            if not folder_name:
+                await safe_edit_message(context, query.message.chat_id, query.message.message_id, "❌ Folder tidak ditemukan. Silakan refresh list.")
+                return
+            
+            job_id = f"megadl_{query.id}"
+            
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, f"✅ Menambahkan ke antrian download: {safe_html(folder_name)}")
+            
+            download_queue.put({
+                'job_id': job_id,
+                'folder_name': folder_name,
+                'update': update,
+                'context': context
+            })
+            active_jobs[job_id] = 'download'
+            
+            asyncio.create_task(process_download_queue())
+        except (ValueError, IndexError) as e:
+            logger.error(f"Error parsing megadl callback: {e}")
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, "❌ Error: Invalid folder index")
     
     elif data == "refresh_mega_list":
-        await query.edit_message_text("🔄 Memuat ulang daftar folder...")
+        await safe_edit_message(context, query.message.chat_id, query.message.message_id, "🔄 Memuat ulang daftar folder...")
         await list_mega_folders(update, context)
     
     elif data == "retry_mega_login":
-        await query.edit_message_text("🔄 Mencoba login ulang ke Mega.nz...")
+        await safe_edit_message(context, query.message.chat_id, query.message.message_id, "🔄 Mencoba login ulang ke Mega.nz...")
         if ensure_mega_session():
-            await query.edit_message_text("✅ Login berhasil! Sekarang coba /listmega lagi")
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, "✅ Login berhasil! Sekarang coba /listmega lagi")
         else:
-            await query.edit_message_text("❌ Login masih gagal. Coba: /loginmega email password")
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, "❌ Login masih gagal. Coba: <code>/loginmega email password</code>")
     
     elif data == "cancel_operation":
-        await query.edit_message_text("❌ Operasi dibatalkan")
+        await safe_edit_message(context, query.message.chat_id, query.message.message_id, "❌ Operasi dibatalkan")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /status"""
@@ -1438,28 +1550,28 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_logged_in, login_msg = check_mega_login()
     
     if mega_available and is_logged_in:
-        mega_status = f"✅ {login_msg}"
+        mega_status = f"✅ {safe_html(login_msg)}"
     elif mega_available:
         email, _ = load_mega_credentials()
         if email:
-            mega_status = f"⚠️ Credential tersimpan ({email}), belum login"
+            mega_status = f"⚠️ Credential tersimpan ({safe_html(email)}), belum login"
         else:
             mega_status = "⚠️ Terinstall, belum login"
     else:
         mega_status = "❌ Tidak terinstall"
     
     status_text = f"""
-📊 **Status Sistem**
+📊 <b>Status Sistem</b>
 
 📥 Antrian Download: {download_count}
 📤 Antrian Upload: {upload_count}
 🔄 Jobs Aktif: {active_count}
 
 💾 Mega Status: {mega_status}
-📁 Download Folder: {DOWNLOADS_DIR}
+📁 Download Folder: <code>{safe_html(DOWNLOADS_DIR)}</code>
 🧹 Auto-Cleanup: {'AKTIF ✅' if AUTO_CLEANUP else 'NONAKTIF ❌'}
     """
-    await update.message.reply_text(status_text, parse_mode='Markdown')
+    await safe_send_message(context, update.effective_chat.id, status_text)
 
 async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /cleanup"""
@@ -1468,7 +1580,7 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   if os.path.isdir(os.path.join(DOWNLOADS_DIR, f))]
         
         if not folders:
-            await update.message.reply_text("✅ Tidak ada folder untuk dibersihkan")
+            await safe_send_message(context, update.effective_chat.id, "✅ Tidak ada folder untuk dibersihkan")
             return
         
         total_size = 0
@@ -1486,17 +1598,18 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(
-            f"🧹 **Manual Cleanup**\n\n"
+        await safe_send_message(
+            context,
+            update.effective_chat.id,
+            f"🧹 <b>Manual Cleanup</b>\n\n"
             f"📁 Folder: {len(folders)}\n"
             f"💾 Total size: {total_size / (1024*1024):.2f} MB\n"
             f"⚠️ Yakin ingin menghapus SEMUA folder?",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
+            reply_markup=reply_markup
         )
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await safe_send_message(context, update.effective_chat.id, f"❌ Error: {safe_html(str(e))}")
         logger.error(f"Cleanup error: {e}")
 
 async def cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1515,29 +1628,29 @@ async def cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 shutil.rmtree(folder_path)
                 deleted_count += 1
             
-            await query.edit_message_text(f"✅ Berhasil menghapus {deleted_count} folder")
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, f"✅ Berhasil menghapus {deleted_count} folder")
             logger.info(f"Manual cleanup completed: {deleted_count} folders")
             
         except Exception as e:
-            await query.edit_message_text(f"❌ Gagal menghapus folder: {str(e)}")
+            await safe_edit_message(context, query.message.chat_id, query.message.message_id, f"❌ Gagal menghapus folder: {safe_html(str(e))}")
             logger.error(f"Manual cleanup failed: {e}")
     
     elif query.data == "cleanup_cancel":
-        await query.edit_message_text("❌ Cleanup dibatalkan")
+        await safe_edit_message(context, query.message.chat_id, query.message.message_id, "❌ Cleanup dibatalkan")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /cancel"""
     if not context.args:
-        await update.message.reply_text("❌ Format: /cancel job_id")
+        await safe_send_message(context, update.effective_chat.id, "❌ Format: <code>/cancel job_id</code>")
         return
     
     job_id = context.args[0]
     if job_id in active_jobs:
         active_jobs.pop(job_id)
-        await update.message.reply_text(f"✅ Job {job_id} dibatalkan")
+        await safe_send_message(context, update.effective_chat.id, f"✅ Job {safe_html(job_id)} dibatalkan")
         logger.info(f"Job cancelled: {job_id}")
     else:
-        await update.message.reply_text(f"❌ Job {job_id} tidak ditemukan")
+        await safe_send_message(context, update.effective_chat.id, f"❌ Job {safe_html(job_id)} tidak ditemukan")
 
 # ========== MAIN FUNCTION ==========
 
@@ -1573,7 +1686,6 @@ def main():
     
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("listmega", listmega))
     application.add_handler(CommandHandler("download", download))
@@ -1590,7 +1702,6 @@ def main():
     application.add_handler(CommandHandler("autocleanup", autocleanup))
     application.add_handler(CommandHandler("mysettings", mysettings))
     
-    # Callback handlers
     application.add_handler(CallbackQueryHandler(button_callback, pattern="^(page_|select_|target_|megadl_|refresh_mega_list|retry_mega_login|cancel_operation)"))
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
     
