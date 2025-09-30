@@ -1652,7 +1652,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await safe_send_message(context, update.effective_chat.id, f"❌ Job {safe_html(job_id)} tidak ditemukan")
 
-# ========== MAIN FUNCTION ==========
+# ========== MAIN FUNCTION ===========
 
 def main():
     """Main function"""
