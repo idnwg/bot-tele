@@ -22,14 +22,13 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 TERABOX_CONNECT_KEY = os.getenv('TERABOX_CONNECT_KEY')
 DOODSTREAM_API_KEY = os.getenv('DOODSTREAM_API_KEY')
 AUTO_CLEANUP = os.getenv('AUTO_CLEANUP', 'true').lower() == 'true'
-MEGA_EMAIL = os.getenv('MEGA_EMAIL')
-MEGA_PASSWORD = os.getenv('MEGA_PASSWORD')
 
 BASE_DIR = "/root/bot-tele"
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 TERABOX_CLI = os.path.join(BASE_DIR, "teraboxcli", "main.py")
 TERABOX_SETTINGS = os.path.join(BASE_DIR, "teraboxcli", "settings.json")
 USER_SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
+MEGA_CREDENTIALS_FILE = os.path.join(BASE_DIR, "mega.json")
 
 # Antrian jobs
 download_queue = Queue()
@@ -51,188 +50,139 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== MEGA-CMD SESSION MANAGEMENT ==========
+# ========== MEGA-CMD CREDENTIALS MANAGEMENT ==========
 
-class MegaSessionManager:
-    """Manager untuk handle session Mega.nz secara konsisten"""
-    
-    _session_valid = False
-    _last_check = 0
-    _session_lock = asyncio.Lock()
-    
-    @classmethod
-    async def ensure_session(cls, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Pastikan session Mega.nz valid sebelum operasi apapun"""
-        async with cls._session_lock:
-            chat_id = update.effective_chat.id
-            
-            # Cek jika session masih valid (dalam 5 menit terakhir)
-            current_time = time.time()
-            if cls._session_valid and (current_time - cls._last_check) < 300:
-                logger.info("Using cached valid session")
-                return True
-            
-            await cls._send_progress(chat_id, "🔐 Memverifikasi session Mega.nz...", context)
-            
-            # Check mega-cmd installation
-            if not cls._check_mega_cmd():
-                await cls._send_progress(chat_id, "❌ Mega-cmd tidak ditemukan!", context)
-                return False
-            
-            # Check login status
-            is_logged_in, login_msg = cls._check_mega_login()
-            
-            if is_logged_in:
-                cls._session_valid = True
-                cls._last_check = current_time
-                await cls._send_progress(chat_id, f"✅ {login_msg}", context)
+def save_mega_credentials(email, password):
+    """Simpan credential Mega ke file JSON"""
+    try:
+        credentials = {
+            "email": email,
+            "password": password,
+            "saved_at": time.time()
+        }
+        with open(MEGA_CREDENTIALS_FILE, 'w') as f:
+            json.dump(credentials, f, indent=2)
+        logger.info(f"Mega credentials saved for: {email}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving mega credentials: {e}")
+        return False
+
+def load_mega_credentials():
+    """Load credential Mega dari file JSON"""
+    try:
+        if os.path.exists(MEGA_CREDENTIALS_FILE):
+            with open(MEGA_CREDENTIALS_FILE, 'r') as f:
+                credentials = json.load(f)
+                return credentials.get('email'), credentials.get('password')
+        return None, None
+    except Exception as e:
+        logger.error(f"Error loading mega credentials: {e}")
+        return None, None
+
+def delete_mega_credentials():
+    """Hapus credential Mega"""
+    try:
+        if os.path.exists(MEGA_CREDENTIALS_FILE):
+            os.remove(MEGA_CREDENTIALS_FILE)
+            logger.info("Mega credentials deleted")
+            return True
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting mega credentials: {e}")
+        return False
+
+def check_mega_cmd():
+    """Check jika mega-cmd terinstall"""
+    try:
+        result = subprocess.run(['mega-ls', '--help'], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0 or 'mega' in result.stdout.lower()
+    except:
+        return False
+
+def check_mega_login():
+    """Check status login Mega.nz"""
+    try:
+        result = subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            output = result.stdout.strip()
+            if '@' in output:
+                return True, f"Logged in as: {output}"
+            return True, f"Status: {output}"
+        return False, "Not logged in"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+def login_to_mega(email, password):
+    """Login ke Mega.nz dengan credential"""
+    try:
+        # Method 1: Direct login
+        try:
+            result = subprocess.run(
+                ['mega-login', email, password],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                # Verify login worked
+                time.sleep(2)
+                is_logged_in, msg = check_mega_login()
+                if is_logged_in:
+                    logger.info(f"Successfully logged in as: {email}")
+                    return True, "Login successful"
+        except Exception as e:
+            logger.warning(f"Direct login failed: {e}")
+
+        # Method 2: Interactive login
+        try:
+            process = subprocess.Popen(
+                ['mega-login'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            output, error = process.communicate(
+                input=f"{email}\n{password}\n",
+                timeout=30
+            )
+            if process.returncode == 0:
+                time.sleep(2)
+                is_logged_in, msg = check_mega_login()
+                if is_logged_in:
+                    logger.info(f"Successfully logged in interactively as: {email}")
+                    return True, "Login successful"
+        except Exception as e:
+            logger.warning(f"Interactive login failed: {e}")
+
+        return False, "Login failed with all methods"
+        
+    except Exception as e:
+        return False, f"Login error: {str(e)}"
+
+def ensure_mega_session():
+    """Pastikan session Mega.nz valid"""
+    try:
+        # Check if already logged in
+        is_logged_in, login_msg = check_mega_login()
+        if is_logged_in:
+            logger.info(f"Mega session valid: {login_msg}")
+            return True
+        
+        # Try to login with saved credentials
+        email, password = load_mega_credentials()
+        if email and password:
+            logger.info(f"Attempting auto-login with saved credentials for: {email}")
+            login_success, login_result = login_to_mega(email, password)
+            if login_success:
                 return True
             else:
-                await cls._send_progress(chat_id, "🔄 Session expired, melakukan login ulang...", context)
-                
-                # Try to re-login
-                login_success, login_result = cls._force_mega_relogin()
-                if login_success:
-                    cls._session_valid = True
-                    cls._last_check = current_time
-                    await cls._send_progress(chat_id, f"✅ Login berhasil: {login_result}", context)
-                    return True
-                else:
-                    cls._session_valid = False
-                    await cls._send_progress(chat_id, f"❌ Gagal login: {login_result}", context)
-                    return False
-    
-    @staticmethod
-    def _check_mega_cmd():
-        """Check jika mega-cmd terinstall"""
-        try:
-            test_commands = [
-                ['mega-ls', '--help'],
-                ['mega-whoami'],
-                ['mega-version'],
-                ['snap', 'run', 'mega-cmd', '--help']
-            ]
-            
-            for cmd in test_commands:
-                try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0 or 'mega' in result.stdout.lower():
-                        logger.info(f"Mega-cmd available via: {' '.join(cmd)}")
-                        return True
-                except:
-                    continue
-            
-            return False
-        except Exception as e:
-            logger.error(f"Error checking mega-cmd: {e}")
-            return False
-    
-    @staticmethod
-    def _check_mega_login():
-        """Check status login Mega.nz"""
-        try:
-            # Method 1: mega-whoami
-            try:
-                result = subprocess.run(['mega-whoami'], capture_output=True, text=True, timeout=30)
-                if result.returncode == 0 and result.stdout.strip():
-                    output = result.stdout.strip()
-                    if '@' in output:
-                        return True, f"Logged in as: {output}"
-            except:
-                pass
-            
-            # Method 2: mega-cmd whoami
-            try:
-                result = subprocess.run(['mega-cmd', 'whoami'], capture_output=True, text=True, timeout=30)
-                if result.returncode == 0 and result.stdout.strip():
-                    output = result.stdout.strip()
-                    if '@' in output:
-                        return True, f"Logged in as: {output}"
-            except:
-                pass
-            
-            # Method 3: Try to list root (indirect check)
-            try:
-                result = subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=30)
-                if result.returncode == 0:
-                    return True, "Logged in (verified via directory listing)"
-            except:
-                pass
-            
-            return False, "Not logged in"
-            
-        except Exception as e:
-            return False, f"Error: {str(e)}"
-    
-    @staticmethod
-    def _force_mega_relogin():
-        """Force login ke Mega.nz"""
-        try:
-            if not MEGA_EMAIL or not MEGA_PASSWORD:
-                return False, "Credentials not set in .env"
-            
-            logger.info("Attempting Mega.nz login...")
-            
-            # Method 1: Direct login
-            try:
-                result = subprocess.run(
-                    ['mega-login', MEGA_EMAIL, MEGA_PASSWORD],
-                    capture_output=True, text=True, timeout=30
-                )
-                if result.returncode == 0:
-                    # Verify login worked
-                    time.sleep(2)  # Wait for session to establish
-                    is_logged_in, msg = MegaSessionManager._check_mega_login()
-                    if is_logged_in:
-                        return True, "Login successful"
-            except Exception as e:
-                logger.warning(f"Login method 1 failed: {e}")
-            
-            # Method 2: Interactive login
-            try:
-                process = subprocess.Popen(
-                    ['mega-login'],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                output, error = process.communicate(
-                    input=f"{MEGA_EMAIL}\n{MEGA_PASSWORD}\n",
-                    timeout=30
-                )
-                if process.returncode == 0:
-                    time.sleep(2)
-                    is_logged_in, msg = MegaSessionManager._check_mega_login()
-                    if is_logged_in:
-                        return True, "Login successful"
-            except Exception as e:
-                logger.warning(f"Login method 2 failed: {e}")
-            
-            return False, "All login methods failed"
-            
-        except Exception as e:
-            return False, f"Login error: {str(e)}"
-    
-    @staticmethod
-    async def _send_progress(chat_id, message, context):
-        """Helper untuk mengirim progress message"""
-        try:
-            if 'progress_msg_id' in context.user_data:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=context.user_data['progress_msg_id'],
-                        text=message
-                    )
-                except:
-                    msg = await context.bot.send_message(chat_id=chat_id, text=message)
-                    context.user_data['progress_msg_id'] = msg.message_id
-            else:
-                msg = await context.bot.send_message(chat_id=chat_id, text=message)
-                context.user_data['progress_msg_id'] = msg.message_id
-        except Exception as e:
-            logger.error(f"Error sending progress: {e}")
+                logger.warning(f"Auto-login failed: {login_result}")
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error ensuring mega session: {e}")
+        return False
 
 # ========== USER SETTINGS MANAGEMENT ==========
 
@@ -401,80 +351,80 @@ async def list_mega_folders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         
-        # Pastikan session valid
-        if not await MegaSessionManager.ensure_session(update, context):
+        # Check mega-cmd installation
+        if not check_mega_cmd():
             await update.message.reply_text(
-                "❌ **Tidak dapat terhubung ke Mega.nz!**\n\n"
-                "Pastikan:\n"
-                "1. Mega-cmd terinstall: `sudo snap install mega-cmd`\n"
-                "2. Credential di .env sudah benar\n"
-                "3. Coba login manual: `mega-login email password`"
+                "❌ **Mega-cmd tidak ditemukan!**\n\n"
+                "Silakan install mega-cmd terlebih dahulu:\n"
+                "`sudo snap install mega-cmd`\n\n"
+                "Setelah itu login dengan:\n"
+                "`/loginmega email password`"
+            )
+            return
+        
+        # Ensure valid session
+        await send_progress_message(chat_id, "🔐 Memeriksa session Mega.nz...", context)
+        if not ensure_mega_session():
+            await update.message.reply_text(
+                "❌ **Belum login ke Mega.nz!**\n\n"
+                "Silakan login terlebih dahulu dengan:\n"
+                "`/loginmega email password`\n\n"
+                "Atau pastikan credential sudah tersimpan."
             )
             return
         
         await send_progress_message(chat_id, "📡 Mengambil daftar folder dari Mega.nz...", context)
         
-        # Gunakan mega-ls untuk list folder
-        try:
-            result = subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=60)
-            
-            if result.returncode != 0:
-                # Session mungkin expired, coba refresh
-                MegaSessionManager._session_valid = False
-                if not await MegaSessionManager.ensure_session(update, context):
-                    raise Exception("Gagal refresh session")
+        # List folders using mega-ls
+        result = subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=60)
+        
+        if result.returncode != 0:
+            await send_progress_message(chat_id, "❌ Gagal mengambil daftar folder. Session mungkin expired.", context)
+            return
+        
+        lines = result.stdout.strip().split('\n')
+        folders = []
+        
+        for line in lines:
+            line = line.strip()
+            if (line and 
+                not line.startswith('[') and 
+                not line.startswith('Used') and 
+                not line.startswith('Total') and
+                not line.startswith('MEGA') and
+                '://' not in line):
                 
-                # Coba lagi
-                result = subprocess.run(['mega-ls', '/'], capture_output=True, text=True, timeout=60)
-                if result.returncode != 0:
-                    raise Exception(f"mega-ls failed: {result.stderr}")
+                # Filter untuk folder (bukan file)
+                if '.' not in line or any(x in line for x in [' ', '/']):
+                    if line and line not in folders:
+                        folders.append(line)
+        
+        if not folders:
+            await send_progress_message(chat_id, "📭 Tidak ada folder di akun Mega.nz", context)
+            return
+        
+        # Buat keyboard untuk pilihan folder
+        keyboard = []
+        for folder in sorted(folders)[:30]:
+            if folder:
+                keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"megadl_{folder}")])
+        
+        if not keyboard:
+            await send_progress_message(chat_id, "❌ Tidak ada folder valid yang ditemukan", context)
+            return
             
-            lines = result.stdout.strip().split('\n')
-            folders = []
-            
-            for line in lines:
-                line = line.strip()
-                if (line and 
-                    not line.startswith('[') and 
-                    not line.startswith('Used') and 
-                    not line.startswith('Total') and
-                    not line.startswith('MEGA') and
-                    '://' not in line):
-                    
-                    # Filter untuk folder (bukan file)
-                    if '.' not in line or any(x in line for x in [' ', '/']):
-                        if line and line not in folders:
-                            folders.append(line)
-            
-            if not folders:
-                await send_progress_message(chat_id, "📭 Tidak ada folder di akun Mega.nz", context)
-                return
-            
-            # Buat keyboard untuk pilihan folder
-            keyboard = []
-            for folder in sorted(folders)[:30]:
-                if folder:
-                    keyboard.append([InlineKeyboardButton(f"📁 {folder}", callback_data=f"megadl_{folder}")])
-            
-            if not keyboard:
-                await send_progress_message(chat_id, "❌ Tidak ada folder valid yang ditemukan", context)
-                return
-                
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"📂 Pilih folder dari Mega.nz untuk didownload ({len(folders)} folder ditemukan):",
-                reply_markup=reply_markup
-            )
-            
-            await send_progress_message(chat_id, f"✅ Berhasil mendapatkan {len(folders)} folder", context)
-            
-        except subprocess.TimeoutExpired:
-            await send_progress_message(chat_id, "❌ Timeout: Gagal mengambil daftar folder", context)
-        except Exception as e:
-            raise e
-            
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📂 Pilih folder dari Mega.nz untuk didownload ({len(folders)} folder ditemukan):",
+            reply_markup=reply_markup
+        )
+        
+        await send_progress_message(chat_id, f"✅ Berhasil mendapatkan {len(folders)} folder", context)
+        
+    except subprocess.TimeoutExpired:
+        await send_progress_message(chat_id, "❌ Timeout: Gagal mengambil daftar folder", context)
     except Exception as e:
         error_msg = f"❌ Error mengambil daftar folder: {str(e)}"
         await send_progress_message(chat_id, error_msg, context)
@@ -486,9 +436,10 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         chat_id = update.effective_chat.id
         user_settings = get_user_settings(chat_id)
         
-        # Pastikan session valid SEBELUM download
-        if not await MegaSessionManager.ensure_session(update, context):
-            await send_progress_message(chat_id, "❌ Gagal setup session Mega.nz untuk download", context)
+        # Ensure valid session before download
+        await send_progress_message(chat_id, "🔐 Memverifikasi session Mega.nz...", context)
+        if not ensure_mega_session():
+            await send_progress_message(chat_id, "❌ Session Mega.nz tidak valid. Silakan login ulang.", context)
             return
         
         await send_progress_message(chat_id, f"📥 Memulai download folder: {folder_name}", context)
@@ -497,54 +448,50 @@ async def download_mega_folder(folder_name, job_id, update: Update, context: Con
         target_path = os.path.join(DOWNLOADS_DIR, folder_name)
         os.makedirs(target_path, exist_ok=True)
         
-        # Download menggunakan mega-get dengan session yang sudah valid
+        # Download menggunakan mega-get
         await send_progress_message(chat_id, f"⏳ Download dalam proses...", context)
         
-        try:
-            result = subprocess.run(
-                ['mega-get', f'/{folder_name}', target_path],
-                capture_output=True, text=True, timeout=7200
-            )
+        result = subprocess.run(
+            ['mega-get', f'/{folder_name}', target_path],
+            capture_output=True, text=True, timeout=7200
+        )
+        
+        if result.returncode != 0:
+            # Try to re-authenticate and retry
+            await send_progress_message(chat_id, "🔄 Session expired, mencoba login ulang...", context)
+            if ensure_mega_session():
+                await send_progress_message(chat_id, "🔄 Mencoba download lagi...", context)
+                result = subprocess.run(
+                    ['mega-get', f'/{folder_name}', target_path],
+                    capture_output=True, text=True, timeout=7200
+                )
             
             if result.returncode != 0:
-                # Mungkin session expired selama download, coba refresh dan ulangi
-                MegaSessionManager._session_valid = False
-                if await MegaSessionManager.ensure_session(update, context):
-                    await send_progress_message(chat_id, "🔄 Session diperbarui, mencoba download lagi...", context)
-                    result = subprocess.run(
-                        ['mega-get', f'/{folder_name}', target_path],
-                        capture_output=True, text=True, timeout=7200
-                    )
-                
-                if result.returncode != 0:
-                    raise Exception(f"Download gagal: {result.stderr}")
-            
-            await send_progress_message(chat_id, f"✅ Download selesai: {folder_name}", context)
-            
-            # Auto rename files media
-            await send_progress_message(chat_id, f"🔄 Memulai rename file media...", context)
-            rename_results = await auto_rename_media_files(target_path, user_settings['prefix'], update, context)
-            
-            await send_progress_message(chat_id, 
-                f"✅ Rename selesai!\n"
-                f"📸 Foto: {rename_results['photos']} files\n"
-                f"🎬 Video: {rename_results['videos']} files", 
-                context
-            )
-            
-            # Auto upload jika dienable
-            if user_settings.get('auto_upload', False):
-                platform = user_settings.get('platform', 'terabox')
-                await send_progress_message(chat_id, f"📤 Auto-upload ke {platform}...", context)
-                await process_auto_upload(target_path, platform, update, context)
-            
-            logger.info(f"Mega folder download completed: {folder_name}")
-            
-        except subprocess.TimeoutExpired:
-            await send_progress_message(chat_id, "❌ Download timeout (terlalu lama)", context)
-        except Exception as e:
-            raise e
+                raise Exception(f"Download gagal: {result.stderr}")
         
+        await send_progress_message(chat_id, f"✅ Download selesai: {folder_name}", context)
+        
+        # Auto rename files media
+        await send_progress_message(chat_id, f"🔄 Memulai rename file media...", context)
+        rename_results = await auto_rename_media_files(target_path, user_settings['prefix'], update, context)
+        
+        await send_progress_message(chat_id, 
+            f"✅ Rename selesai!\n"
+            f"📸 Foto: {rename_results['photos']} files\n"
+            f"🎬 Video: {rename_results['videos']} files", 
+            context
+        )
+        
+        # Auto upload jika dienable
+        if user_settings.get('auto_upload', False):
+            platform = user_settings.get('platform', 'terabox')
+            await send_progress_message(chat_id, f"📤 Auto-upload ke {platform}...", context)
+            await process_auto_upload(target_path, platform, update, context)
+        
+        logger.info(f"Mega folder download completed: {folder_name}")
+        
+    except subprocess.TimeoutExpired:
+        await send_progress_message(chat_id, "❌ Download timeout (terlalu lama)", context)
     except Exception as e:
         error_msg = f"❌ Gagal download folder: {str(e)}"
         await send_progress_message(update.effective_chat.id, error_msg, context)
@@ -821,6 +768,65 @@ async def process_auto_upload(folder_path, platform, update: Update, context: Co
     elif platform == 'doodstream':
         await upload_to_doodstream(folder_path, update, context)
 
+# ========== MEGA LOGIN/LOGOUT HANDLERS ==========
+
+async def loginmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk /loginmega - Login ke Mega.nz"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "❌ Format: /loginmega <email> <password>\n"
+            "Contoh: /loginmega myemail@example.com mypassword123"
+        )
+        return
+    
+    email = context.args[0]
+    password = ' '.join(context.args[1:])
+    
+    await update.message.reply_text("🔐 Mencoba login ke Mega.nz...")
+    
+    # Save credentials first
+    if save_mega_credentials(email, password):
+        # Try to login
+        login_success, login_result = login_to_mega(email, password)
+        
+        if login_success:
+            await update.message.reply_text(
+                f"✅ **Login berhasil!**\n\n"
+                f"Email: `{email}`\n"
+                f"Status: {login_result}\n\n"
+                f"Sekarang Anda bisa menggunakan:\n"
+                f"• `/listmega` - Lihat folder\n"
+                f"• `/download folder_name` - Download folder"
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ **Credential tersimpan tapi login gagal**\n\n"
+                f"Error: {login_result}\n\n"
+                f"Credential sudah disimpan, bot akan mencoba login otomatis saat diperlukan."
+            )
+    else:
+        await update.message.reply_text("❌ Gagal menyimpan credential Mega.nz")
+
+async def logoutmega(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk /logoutmega - Logout dari Mega.nz"""
+    try:
+        # Try to logout from mega
+        subprocess.run(['mega-logout'], capture_output=True, timeout=30)
+        
+        # Delete saved credentials
+        delete_mega_credentials()
+        
+        await update.message.reply_text(
+            "✅ **Logout berhasil!**\n\n"
+            "Credential Mega.nz telah dihapus.\n"
+            "Gunakan `/loginmega email password` untuk login kembali."
+        )
+        logger.info("Mega.nz logout completed")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error saat logout: {str(e)}")
+        logger.error(f"Logout error: {e}")
+
 # ========== SETTINGS HANDLERS ==========
 
 async def setprefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -902,6 +908,22 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     settings = get_user_settings(user_id)
     
+    # Check mega status
+    mega_available = check_mega_cmd()
+    is_logged_in, login_msg = check_mega_login()
+    
+    if mega_available:
+        if is_logged_in:
+            mega_status = f"✅ {login_msg}"
+        else:
+            email, _ = load_mega_credentials()
+            if email:
+                mega_status = f"⚠️ Credential tersimpan untuk {email}, tapi belum login"
+            else:
+                mega_status = "❌ Belum login"
+    else:
+        mega_status = "❌ Mega-cmd tidak terinstall"
+    
     settings_text = f"""
 ⚙️ **Settings Anda**
 
@@ -910,11 +932,18 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 Auto-upload: **{'AKTIF ✅' if settings.get('auto_upload', False) else 'NONAKTIF ❌'}**
 🧹 Auto-cleanup: **{'AKTIF ✅' if settings.get('auto_cleanup', True) else 'NONAKTIF ❌'}**
 
+**Status Mega.nz:** {mega_status}
+
 **Perintah Settings:**
 /setprefix <prefix> - Atur prefix rename
 /setplatform <terabox|doodstream> - Atur platform upload
 /autoupload - Aktif/nonaktif auto-upload
 /autocleanup - Aktif/nonaktif auto-cleanup
+
+**Perintah Mega.nz:**
+/loginmega <email> <password> - Login ke Mega.nz
+/logoutmega - Logout dari Mega.nz
+/listmega - List folder di Mega.nz
     """
     await update.message.reply_text(settings_text, parse_mode='Markdown')
 
@@ -923,14 +952,18 @@ async def mysettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk /start"""
     # Check mega-cmd status
-    mega_available = MegaSessionManager._check_mega_cmd()
-    is_logged_in, login_msg = MegaSessionManager._check_mega_login()
+    mega_available = check_mega_cmd()
+    is_logged_in, login_msg = check_mega_login()
     
     if mega_available:
         if is_logged_in:
             mega_status = f"✅ Terinstall & Login sebagai: {login_msg}"
         else:
-            mega_status = f"⚠️ Terinstall tapi belum login: {login_msg}"
+            email, _ = load_mega_credentials()
+            if email:
+                mega_status = f"⚠️ Terinstall & Credential tersimpan ({email})"
+            else:
+                mega_status = "⚠️ Terinstall tapi belum login"
     else:
         mega_status = "❌ Mega-cmd tidak terinstall"
     
@@ -940,15 +973,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **Status Mega.nz:** {mega_status}
 
 **Fitur:**
-📥 Download folder dari Mega.nz (Session Managed)
+📥 Download folder dari Mega.nz
 🔄 Auto-rename file media
 📤 Upload ke Terabox & Doodstream
 ⚙️ Custom prefix & auto-upload
 🧹 Auto-cleanup setelah upload
 
-**Perintah:**
+**Perintah Mega.nz:**
+/loginmega <email> <password> - Login ke Mega.nz
+/logoutmega - Logout dari Mega.nz
 /listmega - List folder di Mega.nz
 /download <folder> - Download folder
+
+**Perintah Lain:**
 /rename <old> <new> - Rename manual
 /upload - Upload interaktif
 
@@ -1128,13 +1165,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_count = len(active_jobs)
     
     # Check mega-cmd status
-    mega_available = MegaSessionManager._check_mega_cmd()
-    is_logged_in, login_msg = MegaSessionManager._check_mega_login()
+    mega_available = check_mega_cmd()
+    is_logged_in, login_msg = check_mega_login()
     
     if mega_available and is_logged_in:
         mega_status = f"✅ {login_msg}"
     elif mega_available:
-        mega_status = f"⚠️ {login_msg}"
+        email, _ = load_mega_credentials()
+        if email:
+            mega_status = f"⚠️ Credential tersimpan ({email}), tapi belum login"
+        else:
+            mega_status = "⚠️ Mega-cmd terinstall tapi belum login"
     else:
         mega_status = "❌ mega-cmd not available"
     
@@ -1235,22 +1276,25 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== MAIN FUNCTION ==========
 
 def main():
-    """Main function - SESSION MANAGED VERSION"""
+    """Main function - SIMPLIFIED MEGA LOGIN VERSION"""
     # Pastikan direktori ada
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     
     # Check mega-cmd pada startup
-    logger.info("Initializing Mega.nz Session Manager...")
-    if not MegaSessionManager._check_mega_cmd():
+    logger.info("Checking Mega.nz setup...")
+    if not check_mega_cmd():
         logger.warning("Mega-cmd not found. Mega.nz functionality will be disabled.")
     else:
-        is_logged_in, login_msg = MegaSessionManager._check_mega_login()
+        # Check login status
+        is_logged_in, login_msg = check_mega_login()
         if is_logged_in:
             logger.info(f"Mega.nz login status: {login_msg}")
-            MegaSessionManager._session_valid = True
-            MegaSessionManager._last_check = time.time()
         else:
-            logger.warning(f"Mega.nz login issue: {login_msg}")
+            email, _ = load_mega_credentials()
+            if email:
+                logger.info(f"Mega credentials found for: {email}, but not logged in")
+            else:
+                logger.info("Mega.nz not logged in and no credentials saved")
     
     # Jalankan cleanup untuk folder lama
     try:
@@ -1271,6 +1315,10 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup))
     application.add_handler(CommandHandler("cancel", cancel))
     
+    # Mega login/logout handlers
+    application.add_handler(CommandHandler("loginmega", loginmega))
+    application.add_handler(CommandHandler("logoutmega", logoutmega))
+    
     # Settings handlers
     application.add_handler(CommandHandler("setprefix", setprefix))
     application.add_handler(CommandHandler("setplatform", setplatform))
@@ -1283,7 +1331,7 @@ def main():
     application.add_handler(CallbackQueryHandler(cleanup_callback, pattern="^(cleanup_confirm|cleanup_cancel)$"))
     
     # Jalankan bot
-    logger.info("🤖 Bot started successfully with Session Managed Mega.nz")
+    logger.info("🤖 Bot started successfully with Simplified Mega Login System")
     print("🤖 Bot is running... Press Ctrl+C to stop")
     application.run_polling()
 
