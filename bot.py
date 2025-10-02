@@ -211,16 +211,64 @@ class MegaManager:
         try:
             whoami_cmd = f'{self.mega_cmd_path} -whoami'
             result = subprocess.run(whoami_cmd, shell=True, capture_output=True, text=True, timeout=10)
-            return result.returncode == 0
-        except Exception:
+            if result.returncode == 0:
+                logger.info(f"Mega session active: {result.stdout.strip()}")
+                return True
+            else:
+                logger.warning("Mega session not active")
+                return False
+        except Exception as e:
+            logger.error(f"Error checking mega session: {e}")
             return False
     
-    def download_mega_folder(self, folder_url: str, download_path: Path) -> Tuple[bool, str]:
+    def debug_mega_session(self) -> Dict:
+        """Debug function to check mega session status"""
+        debug_info = {}
+        
         try:
+            # Check whoami
+            whoami_cmd = f'{self.mega_cmd_path} -whoami'
+            result = subprocess.run(whoami_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            debug_info['whoami'] = {
+                'returncode': result.returncode,
+                'stdout': result.stdout.strip(),
+                'stderr': result.stderr.strip()
+            }
+            
+            # Check disk space
+            df_result = subprocess.run(['df', '-h'], capture_output=True, text=True)
+            debug_info['disk_space'] = df_result.stdout
+            
+            # Check if downloads directory exists and is writable
+            download_test = DOWNLOAD_BASE / 'test_write'
+            try:
+                download_test.touch()
+                debug_info['downloads_writable'] = True
+                download_test.unlink()
+            except Exception as e:
+                debug_info['downloads_writable'] = False
+                debug_info['downloads_error'] = str(e)
+            
+            return debug_info
+            
+        except Exception as e:
+            debug_info['error'] = str(e)
+            return debug_info
+    
+    def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str]:
+        """Download folder from Mega.nz with detailed debugging"""
+        try:
+            logger.info(f"Starting download for job {job_id}: {folder_url} -> {download_path}")
+            
+            # Debug session first
+            debug_info = self.debug_mega_session()
+            logger.info(f"Mega debug info for {job_id}: {debug_info}")
+            
             if not self.ensure_mega_session():
                 # Try to login with current account
                 current_account = self.get_current_account()
                 if current_account:
+                    logger.info(f"Attempting login for {job_id} with: {current_account['email']}")
                     success, message = self.login_to_mega(current_account['email'], current_account['password'])
                     if not success:
                         return False, f"Session invalid and login failed: {message}"
@@ -230,30 +278,108 @@ class MegaManager:
             # Create download directory
             download_path.mkdir(parents=True, exist_ok=True)
             
+            # Test write permission
+            test_file = download_path / 'write_test.txt'
+            try:
+                test_file.write_text('test')
+                test_file.unlink()
+            except Exception as e:
+                return False, f"Cannot write to download directory: {str(e)}"
+            
+            # First, let's check what's in the Mega.nz folder
+            logger.info(f"Checking Mega.nz folder contents for {job_id}")
+            ls_cmd = f'{self.mega_cmd_path} -ls {folder_url}'
+            ls_result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True, timeout=30)
+            
+            logger.info(f"Mega-ls result for {job_id}: returncode={ls_result.returncode}, stdout={ls_result.stdout}, stderr={ls_result.stderr}")
+            
+            if ls_result.returncode != 0:
+                return False, f"Cannot access Mega.nz folder: {ls_result.stderr}"
+            
+            # Now attempt download
             download_cmd = f'{self.mega_cmd_path} -get "{folder_url}" "{download_path}"'
-            logger.info(f"Executing download: {download_cmd}")
+            logger.info(f"Executing download for {job_id}: {download_cmd}")
             
             # Execute download with longer timeout
+            start_time = time.time()
             result = subprocess.run(download_cmd, shell=True, capture_output=True, text=True, timeout=7200)  # 2 hours
+            end_time = time.time()
+            
+            download_duration = end_time - start_time
+            logger.info(f"Download completed for {job_id} in {download_duration:.2f}s: returncode={result.returncode}")
             
             if result.returncode == 0:
-                # Wait a moment for files to stabilize
-                time.sleep(5)
+                # Wait for files to stabilize
+                time.sleep(10)
                 
-                # Check if files were actually downloaded
-                files = list(download_path.rglob('*'))
-                file_count = len([f for f in files if f.is_file()])
+                # Check if files were actually downloaded - search recursively
+                all_files = list(download_path.rglob('*'))
+                files = [f for f in all_files if f.is_file()]
+                directories = [f for f in all_files if f.is_dir()]
                 
-                if file_count == 0:
-                    return False, "Download completed but no files found"
+                logger.info(f"File check for {job_id}: {len(files)} files, {len(directories)} directories found")
                 
-                return True, f"Download berhasil! {file_count} files downloaded"
+                # Log all files and directories for debugging
+                for f in files:
+                    logger.info(f"File: {f} ({f.stat().st_size} bytes)")
+                for d in directories:
+                    logger.info(f"Directory: {d}")
+                
+                # Check if files exist in subdirectories (common Mega.nz behavior)
+                total_files = len(files)
+                
+                if total_files == 0:
+                    # Check if there's exactly one subdirectory (Mega.nz often creates one)
+                    if len(directories) == 1:
+                        subdir = directories[0]
+                        subdir_files = list(subdir.rglob('*'))
+                        actual_files = [f for f in subdir_files if f.is_file()]
+                        
+                        if len(actual_files) > 0:
+                            logger.info(f"Found {len(actual_files)} files in subdirectory {subdir}, moving to main directory")
+                            
+                            # Move all files from subdirectory to main download path
+                            for file_path in actual_files:
+                                try:
+                                    relative_path = file_path.relative_to(subdir)
+                                    new_path = download_path / relative_path
+                                    new_path.parent.mkdir(parents=True, exist_ok=True)
+                                    file_path.rename(new_path)
+                                    logger.info(f"Moved {file_path} to {new_path}")
+                                except Exception as e:
+                                    logger.error(f"Error moving file {file_path}: {e}")
+                            
+                            # Remove empty subdirectory
+                            try:
+                                shutil.rmtree(subdir)
+                            except:
+                                pass
+                            
+                            # Re-count files
+                            files = list(download_path.rglob('*'))
+                            files = [f for f in files if f.is_file()]
+                            total_files = len(files)
+                    
+                    if total_files == 0:
+                        # Still no files? Check the output for clues
+                        if "error" in result.stdout.lower() or "error" in result.stderr.lower():
+                            return False, f"Download completed with errors in output: {result.stdout} {result.stderr}"
+                        elif "no such file" in result.stdout.lower() or "no such file" in result.stderr.lower():
+                            return False, "Folder not found or inaccessible"
+                        else:
+                            return False, "Download completed but no files were found in the folder"
+                
+                return True, f"Download berhasil! {total_files} files downloaded in {download_duration:.2f}s"
             else:
                 error_msg = result.stderr if result.stderr else result.stdout
+                logger.error(f"Download command failed for {job_id}: {error_msg}")
                 return False, f"Download gagal: {error_msg}"
+                
         except subprocess.TimeoutExpired:
+            logger.error(f"Download timeout for {job_id}")
             return False, "Download timeout (2 hours)"
         except Exception as e:
+            logger.error(f"Unexpected error in download for {job_id}: {e}")
             return False, f"Error: {str(e)}"
 
 class FileManager:
@@ -285,6 +411,7 @@ class FileManager:
                     if file_path != new_path:
                         file_path.rename(new_path)
                         renamed_count += 1
+                        logger.info(f"Renamed: {file_path.name} -> {new_name}")
                 except Exception as e:
                     logger.error(f"Error renaming {file_path}: {e}")
                     continue
@@ -318,7 +445,7 @@ class UploadManager:
                 try:
                     # Run the uploader for the specific folder
                     cmd = ['python', 'main.py', '--source', str(folder_path)]
-                    logger.info(f"Executing TeraboxUploaderCLI: {cmd}")
+                    logger.info(f"Executing TeraboxUploaderCLI for {job_id}: {cmd}")
                     
                     # Execute with timeout
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
@@ -341,11 +468,11 @@ class UploadManager:
                     
         except subprocess.TimeoutExpired:
             error_msg = "Upload timeout (2 hours)"
-            logger.error(f"Terabox upload timeout: {error_msg}")
+            logger.error(f"Terabox upload timeout for {job_id}: {error_msg}")
             await self.send_progress_message(update, context, job_id, f"❌ Upload timeout: {error_msg}")
             return []
         except Exception as e:
-            logger.error(f"Terabox upload error: {e}")
+            logger.error(f"Terabox upload error for {job_id}: {e}")
             await self.send_progress_message(update, context, job_id, f"❌ Error upload: {str(e)}")
             return []
     
@@ -391,7 +518,7 @@ class UploadManager:
             
             return links
         except Exception as e:
-            logger.error(f"Doodstream upload error: {e}")
+            logger.error(f"Doodstream upload error for {job_id}: {e}")
             await self.send_progress_message(update, context, job_id, f"❌ Error upload: {str(e)}")
             return []
     
@@ -512,8 +639,8 @@ class DownloadProcessor:
             # Create download path
             download_path = DOWNLOAD_BASE / folder_name
             
-            # Download from Mega.nz
-            success, message = self.mega_manager.download_mega_folder(mega_url, download_path)
+            # Download from Mega.nz with debug info
+            success, message = self.mega_manager.download_mega_folder(mega_url, download_path, job_id)
             
             if not success:
                 active_downloads[job_id]['status'] = DownloadStatus.ERROR
@@ -599,7 +726,7 @@ class DownloadProcessor:
                                 update, context, job_id, "📁 Folder sudah kosong, skip cleanup"
                             )
                 except Exception as e:
-                    logger.error(f"Cleanup error: {e}")
+                    logger.error(f"Cleanup error for {job_id}: {e}")
                     await self.upload_manager.send_progress_message(
                         update, context, job_id, f"⚠️ Cleanup error: {str(e)}"
                     )
@@ -805,6 +932,34 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = active_text + "\n" + queue_text + "\n" + system_text
     await update.message.reply_text(full_text)
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug command to check system status"""
+    user_id = update.effective_user.id
+    
+    # Check if user is authorized (you can add user ID checks here)
+    debug_info = mega_manager.debug_mega_session()
+    
+    debug_text = "🔧 DEBUG INFORMATION:\n\n"
+    
+    # Mega.nz status
+    debug_text += "MEGA.NZ STATUS:\n"
+    debug_text += f"• Mega-cmd available: {'✅' if mega_manager.check_mega_cmd() else '❌'}\n"
+    debug_text += f"• Mega-cmd path: {mega_manager.mega_cmd_path}\n"
+    debug_text += f"• Session active: {'✅' if mega_manager.ensure_mega_session() else '❌'}\n"
+    
+    if 'whoami' in debug_info:
+        debug_text += f"• Whoami: {debug_info['whoami']['stdout']}\n"
+    
+    # Disk space
+    debug_text += f"• Downloads writable: {'✅' if debug_info.get('downloads_writable', False) else '❌'}\n"
+    
+    # Accounts
+    debug_text += f"• Accounts configured: {len(mega_manager.accounts)}\n"
+    for i, acc in enumerate(mega_manager.accounts):
+        debug_text += f"  Account {i+1}: {acc['email']}\n"
+    
+    await update.message.reply_text(debug_text)
+
 async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set custom prefix for auto-rename"""
     if not context.args:
@@ -1001,6 +1156,7 @@ def main():
     application.add_handler(CommandHandler("download", download_command))
     application.add_handler(CommandHandler("upload", upload_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("setprefix", set_prefix))
     application.add_handler(CommandHandler("setplatform", set_platform))
     application.add_handler(CommandHandler("autoupload", auto_upload_toggle))
