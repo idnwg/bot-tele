@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 from enum import Enum
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     ContextTypes, MessageHandler, filters
@@ -133,10 +133,25 @@ class MegaManager:
     
     def check_mega_cmd(self) -> bool:
         try:
-            result = subprocess.run(['mega-cmd', '--version'], 
-                                  capture_output=True, text=True, timeout=10)
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+            # Try multiple commands to check mega-cmd
+            commands = [
+                ['mega-version'],
+                ['mega-cmd', '--version'],
+                ['which', 'mega-cmd'],
+                ['mega-help']
+            ]
+            
+            for cmd in commands:
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        logger.info(f"Mega-cmd found with: {cmd}")
+                        return True
+                except:
+                    continue
+            return False
+        except Exception as e:
+            logger.error(f"Error checking mega-cmd: {e}")
             return False
     
     def get_current_account(self) -> Optional[Dict]:
@@ -152,7 +167,7 @@ class MegaManager:
     def login_to_mega(self, email: str, password: str) -> Tuple[bool, str]:
         try:
             # Logout first to ensure clean session
-            subprocess.run('mega-logout', shell=True, capture_output=True, text=True)
+            subprocess.run('mega-logout', shell=True, capture_output=True, text=True, timeout=10)
             
             cmd = f'mega-login "{email}" "{password}"'
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
@@ -167,7 +182,8 @@ class MegaManager:
                     json.dump(session_info, f)
                 return True, f"Login berhasil ke: {email}"
             else:
-                return False, f"Login gagal: {result.stderr}"
+                error_msg = result.stderr if result.stderr else "Unknown error"
+                return False, f"Login gagal: {error_msg}"
         except subprocess.TimeoutExpired:
             return False, "Login timeout"
         except Exception as e:
@@ -388,8 +404,7 @@ class UploadManager:
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=active_downloads[job_id]['progress_message_id'],
-                        text=f"**{active_downloads[job_id]['folder_name']}**\n{message}",
-                        parse_mode='Markdown'
+                        text=f"{active_downloads[job_id]['folder_name']}\n{message}"
                     )
                     return
                 except Exception:
@@ -399,8 +414,7 @@ class UploadManager:
             # Send new message
             msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"**{active_downloads[job_id]['folder_name']}**\n{message}",
-                parse_mode='Markdown'
+                text=f"{active_downloads[job_id]['folder_name']}\n{message}"
             )
             active_downloads[job_id]['progress_message_id'] = msg.message_id
             
@@ -576,16 +590,16 @@ download_processor.start_processing()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
     welcome_text = """
-🤖 **Mega Downloader Bot**
+🤖 Mega Downloader Bot
 
-**Fitur:**
+Fitur:
 📥 Download folder dari Mega.nz via link
 📝 Auto-rename file media
 📤 Upload ke Terabox/Doodstream
 ⚡ Maksimal 2 download bersamaan
 📊 System antrian otomatis
 
-**Perintah:**
+Perintah:
 /download <nama_folder> <link_mega> - Download folder
 /upload <nama_folder> - Upload manual
 /status - Status sistem & antrian
@@ -597,37 +611,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /cleanup - Hapus folder download
 /help - Bantuan lengkap
 
-**Contoh:**
-`/download AMIBEL https://mega.nz/folder/abc123#xyz`
+Contoh:
+/download AMIBEL https://mega.nz/folder/abc123#xyz
     """
     
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await update.message.reply_text(welcome_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Help command handler"""
     help_text = """
-📚 **Daftar Perintah:**
+📚 Daftar Perintah:
 
-**DOWNLOAD COMMANDS**
+DOWNLOAD COMMANDS
 /download <nama_folder> <link_mega> - Download folder dari Mega.nz
 /upload <nama_folder> - Upload folder manual
 
-**SETTINGS COMMANDS**
+SETTINGS COMMANDS
 /setprefix <prefix> - Set custom prefix untuk rename
 /setplatform <terabox|doodstream> - Pilih platform upload
 /autoupload - Toggle auto-upload setelah download
 /autocleanup - Toggle auto-cleanup setelah upload
 
-**INFO COMMANDS**
+INFO COMMANDS
 /status - Status sistem & antrian download
 /mysettings - Lihat pengaturan saat ini
 
-**MAINTENANCE**
+MAINTENANCE
 /cleanup - Hapus semua folder download
 /cancel <job_id> - Batalkan download (soon)
 
-**Contoh Download:**
-`/download AMIBEL https://mega.nz/folder/syUExAxI#9LDA5zV_2CpgwDnn0py93w`
+Contoh Download:
+/download AMIBEL https://mega.nz/folder/syUExAxI#9LDA5zV_2CpgwDnn0py93w
 
 Bot akan:
 1. Download folder dari link Mega.nz
@@ -684,19 +698,18 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue_position = queue_list.index(active_downloads[job_id]) + 1 if active_downloads[job_id] in queue_list else 0
     
     await update.message.reply_text(
-        f"✅ **Download Ditambahkan ke Antrian**\n\n"
-        f"📁 Folder: `{folder_name}`\n"
+        f"✅ Download Ditambahkan ke Antrian\n\n"
+        f"📁 Folder: {folder_name}\n"
         f"🔗 Link: {mega_url}\n"
-        f"🆔 Job ID: `{job_id}`\n"
+        f"🆔 Job ID: {job_id}\n"
         f"📊 Posisi Antrian: #{queue_position + 1}\n"
-        f"⚡ Download Aktif: {download_processor.current_processes}/{MAX_CONCURRENT_DOWNLOADS}",
-        parse_mode='Markdown'
+        f"⚡ Download Aktif: {download_processor.current_processes}/{MAX_CONCURRENT_DOWNLOADS}"
     )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show system status"""
     # Active downloads
-    active_text = "**📥 DOWNLOAD AKTIF:**\n"
+    active_text = "📥 DOWNLOAD AKTIF:\n"
     if active_downloads:
         for job_id, job in list(active_downloads.items()):
             status_emoji = {
@@ -708,15 +721,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 DownloadStatus.ERROR: "❌"
             }.get(job['status'], "⏳")
             
-            active_text += f"{status_emoji} **{job['folder_name']}**\n"
+            active_text += f"{status_emoji} {job['folder_name']}\n"
             active_text += f"   Status: {job['progress']}\n"
-            active_text += f"   ID: `{job_id}`\n\n"
+            active_text += f"   ID: {job_id}\n\n"
     else:
         active_text += "Tidak ada download aktif\n\n"
     
     # Queue
     queue_list = list(download_queue.queue)
-    queue_text = "**📊 ANTRIAN:**\n"
+    queue_text = "📊 ANTRIAN:\n"
     if queue_list:
         for i, job in enumerate(queue_list):
             queue_text += f"#{i+1} {job['folder_name']}\n"
@@ -725,7 +738,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # System info
     system_text = f"""
-**⚙️ SISTEM INFO:**
+⚙️ SISTEM INFO:
 • Download Aktif: {download_processor.current_processes}/{MAX_CONCURRENT_DOWNLOADS}
 • Dalam Antrian: {download_queue.qsize()}
 • Mega.nz CMD: {'✅' if mega_manager.check_mega_cmd() else '❌'}
@@ -735,7 +748,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     full_text = active_text + "\n" + queue_text + "\n" + system_text
-    await update.message.reply_text(full_text, parse_mode='Markdown')
+    await update.message.reply_text(full_text)
 
 async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set custom prefix for auto-rename"""
@@ -753,11 +766,10 @@ async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings_manager.update_user_settings(user_id, {'prefix': prefix})
     
     await update.message.reply_text(
-        f"✅ **Prefix Diubah**\n\n"
-        f"Prefix baru: `{prefix}`\n"
-        f"Contoh file: `{prefix}pic_0001.jpg`\n"
-        f"`{prefix}vid_0001.mp4`",
-        parse_mode='Markdown'
+        f"✅ Prefix Diubah\n\n"
+        f"Prefix baru: {prefix}\n"
+        f"Contoh file: {prefix}pic_0001.jpg\n"
+        f"{prefix}vid_0001.mp4"
     )
 
 async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -777,7 +789,7 @@ async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     settings_manager.update_user_settings(user_id, {'platform': platform})
     
-    await update.message.reply_text(f"✅ Platform upload diubah menjadi: **{platform}**", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ Platform upload diubah menjadi: {platform}")
 
 async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle auto-upload"""
@@ -788,7 +800,7 @@ async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE)
     settings_manager.update_user_settings(user_id, {'auto_upload': new_auto_upload})
     
     status = "AKTIF" if new_auto_upload else "NON-AKTIF"
-    await update.message.reply_text(f"✅ Auto-upload: **{status}**", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ Auto-upload: {status}")
 
 async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle auto-cleanup"""
@@ -799,7 +811,7 @@ async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE
     settings_manager.update_user_settings(user_id, {'auto_cleanup': new_auto_cleanup})
     
     status = "AKTIF" if new_auto_cleanup else "NON-AKTIF"
-    await update.message.reply_text(f"✅ Auto-cleanup: **{status}**", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ Auto-cleanup: {status}")
 
 async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user settings"""
@@ -807,15 +819,15 @@ async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = settings_manager.get_user_settings(user_id)
     
     settings_text = f"""
-⚙️ **PENGATURAN SAYA**
+⚙️ PENGATURAN SAYA
 
-📝 Prefix: `{settings.get('prefix', 'file_')}`
-📤 Platform: `{settings.get('platform', 'terabox')}`
-🔄 Auto-upload: `{'✅ AKTIF' if settings.get('auto_upload', True) else '❌ NON-AKTIF'}`
-🧹 Auto-cleanup: `{'✅ AKTIF' if settings.get('auto_cleanup', True) else '❌ NON-AKTIF'}`
+📝 Prefix: {settings.get('prefix', 'file_')}
+📤 Platform: {settings.get('platform', 'terabox')}
+🔄 Auto-upload: {'✅ AKTIF' if settings.get('auto_upload', True) else '❌ NON-AKTIF'}
+🧹 Auto-cleanup: {'✅ AKTIF' if settings.get('auto_cleanup', True) else '❌ NON-AKTIF'}
     """
     
-    await update.message.reply_text(settings_text, parse_mode='Markdown')
+    await update.message.reply_text(settings_text)
 
 async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cleanup all download folders"""
@@ -906,8 +918,11 @@ def main():
     DOWNLOAD_BASE.mkdir(exist_ok=True)
     
     # Check Mega.nz installation
-    if not mega_manager.check_mega_cmd():
+    mega_available = mega_manager.check_mega_cmd()
+    if not mega_available:
         logger.warning("Mega.nz CMD tidak terpasang! Install dengan: sudo snap install mega-cmd")
+    else:
+        logger.info("Mega.nz CMD terdeteksi")
     
     # Check if accounts are configured
     if not mega_manager.accounts:
