@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime
 from queue import Queue
 from typing import Dict, List, Tuple, Optional
@@ -53,6 +54,7 @@ user_progress_messages = {}
 class DownloadStatus(Enum):
     PENDING = "pending"
     DOWNLOADING = "downloading"
+    DOWNLOAD_COMPLETED = "download_completed"
     RENAMING = "renaming"
     UPLOADING = "uploading"
     COMPLETED = "completed"
@@ -231,15 +233,26 @@ class MegaManager:
             download_cmd = f'{self.mega_cmd_path} -get "{folder_url}" "{download_path}"'
             logger.info(f"Executing download: {download_cmd}")
             
-            result = subprocess.run(download_cmd, shell=True, capture_output=True, text=True, timeout=3600)
+            # Execute download with longer timeout
+            result = subprocess.run(download_cmd, shell=True, capture_output=True, text=True, timeout=7200)  # 2 hours
             
             if result.returncode == 0:
-                return True, f"Download berhasil!"
+                # Wait a moment for files to stabilize
+                time.sleep(5)
+                
+                # Check if files were actually downloaded
+                files = list(download_path.rglob('*'))
+                file_count = len([f for f in files if f.is_file()])
+                
+                if file_count == 0:
+                    return False, "Download completed but no files found"
+                
+                return True, f"Download berhasil! {file_count} files downloaded"
             else:
                 error_msg = result.stderr if result.stderr else result.stdout
                 return False, f"Download gagal: {error_msg}"
         except subprocess.TimeoutExpired:
-            return False, "Download timeout (1 hour)"
+            return False, "Download timeout (2 hours)"
         except Exception as e:
             return False, f"Error: {str(e)}"
 
@@ -307,7 +320,8 @@ class UploadManager:
                     cmd = ['python', 'main.py', '--source', str(folder_path)]
                     logger.info(f"Executing TeraboxUploaderCLI: {cmd}")
                     
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+                    # Execute with timeout
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
                     
                     if result.returncode == 0:
                         # Parse output for success
@@ -326,7 +340,7 @@ class UploadManager:
                     os.chdir(old_cwd)
                     
         except subprocess.TimeoutExpired:
-            error_msg = "Upload timeout (1 hour)"
+            error_msg = "Upload timeout (2 hours)"
             logger.error(f"Terabox upload timeout: {error_msg}")
             await self.send_progress_message(update, context, job_id, f"❌ Upload timeout: {error_msg}")
             return []
@@ -509,15 +523,30 @@ class DownloadProcessor:
                 )
                 return
             
+            # Check if files actually exist
+            files = list(download_path.rglob('*'))
+            file_count = len([f for f in files if f.is_file()])
+            
+            if file_count == 0:
+                active_downloads[job_id]['status'] = DownloadStatus.ERROR
+                active_downloads[job_id]['error'] = "No files downloaded"
+                await self.upload_manager.send_progress_message(
+                    update, context, job_id, "❌ Download gagal: tidak ada file yang terdownload"
+                )
+                return
+            
             # Update status
-            active_downloads[job_id]['status'] = DownloadStatus.RENAMING
-            active_downloads[job_id]['progress'] = "Renaming files"
+            active_downloads[job_id]['status'] = DownloadStatus.DOWNLOAD_COMPLETED
+            active_downloads[job_id]['progress'] = "Download selesai, memulai rename"
             
             await self.upload_manager.send_progress_message(
-                update, context, job_id, "✅ Download selesai! Renaming files..."
+                update, context, job_id, f"✅ Download selesai! {file_count} files downloaded. Renaming files..."
             )
             
             # Auto-rename files
+            active_downloads[job_id]['status'] = DownloadStatus.RENAMING
+            active_downloads[job_id]['progress'] = "Renaming files"
+            
             user_settings = self.settings_manager.get_user_settings(user_id)
             prefix = user_settings.get('prefix', 'file_')
             rename_result = self.file_manager.auto_rename_media_files(download_path, prefix)
@@ -553,15 +582,27 @@ class DownloadProcessor:
             # Auto-cleanup if enabled
             if user_settings.get('auto_cleanup', True):
                 try:
-                    # For Terabox, files might be deleted by TeraboxUploaderCLI
-                    # For Doodstream, we need to cleanup manually
+                    # Wait a moment before cleanup
+                    await asyncio.sleep(2)
+                    
+                    # Check if folder still exists and has files
                     if os.path.exists(download_path):
-                        shutil.rmtree(download_path)
-                        await self.upload_manager.send_progress_message(
-                            update, context, job_id, "🧹 Auto-cleanup selesai!"
-                        )
+                        # Double check if upload really completed
+                        files_after_upload = list(download_path.rglob('*'))
+                        if files_after_upload:
+                            shutil.rmtree(download_path)
+                            await self.upload_manager.send_progress_message(
+                                update, context, job_id, "🧹 Auto-cleanup selesai!"
+                            )
+                        else:
+                            await self.upload_manager.send_progress_message(
+                                update, context, job_id, "📁 Folder sudah kosong, skip cleanup"
+                            )
                 except Exception as e:
                     logger.error(f"Cleanup error: {e}")
+                    await self.upload_manager.send_progress_message(
+                        update, context, job_id, f"⚠️ Cleanup error: {str(e)}"
+                    )
             
             # Mark as completed
             active_downloads[job_id]['status'] = DownloadStatus.COMPLETED
@@ -727,9 +768,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status_emoji = {
                 DownloadStatus.PENDING: "⏳",
                 DownloadStatus.DOWNLOADING: "📥",
+                DownloadStatus.DOWNLOAD_COMPLETED: "✅",
                 DownloadStatus.RENAMING: "📝",
                 DownloadStatus.UPLOADING: "📤",
-                DownloadStatus.COMPLETED: "✅",
+                DownloadStatus.COMPLETED: "🎉",
                 DownloadStatus.ERROR: "❌"
             }.get(job['status'], "⏳")
             
