@@ -102,29 +102,29 @@ class MegaManager:
         self.accounts = self.load_mega_accounts()
         self.current_account_index = 0
         # Get mega command path
-        self.mega_cmd_path = self._get_mega_cmd_path()
+        self.mega_get_path = self._get_mega_get_path()
     
-    def _get_mega_cmd_path(self) -> str:
-        """Get the correct path for mega commands"""
+    def _get_mega_get_path(self) -> str:
+        """Get the correct path for mega-get command"""
         # Try multiple possible paths
         possible_paths = [
-            '/snap/bin/mega-cmd',
-            '/usr/bin/mega-cmd',
-            '/usr/local/bin/mega-cmd',
-            'mega-cmd'  # Fallback to PATH
+            '/snap/bin/mega-get',
+            '/usr/bin/mega-get', 
+            '/usr/local/bin/mega-get',
+            'mega-get'  # Fallback to PATH
         ]
         
         for path in possible_paths:
             try:
                 result = subprocess.run(['which', path], capture_output=True, text=True)
                 if result.returncode == 0:
-                    logger.info(f"Found mega-cmd at: {path}")
+                    logger.info(f"Found mega-get at: {path}")
                     return path
             except:
                 continue
         
-        logger.warning("Mega-cmd not found in standard paths, using 'mega-cmd'")
-        return "mega-cmd"
+        logger.warning("mega-get not found in standard paths, using 'mega-get'")
+        return "mega-get"
     
     def load_mega_accounts(self) -> List[Dict]:
         """Load mega accounts from environment variables"""
@@ -157,14 +157,14 @@ class MegaManager:
         
         return accounts
     
-    def check_mega_cmd(self) -> bool:
+    def check_mega_get(self) -> bool:
+        """Check if mega-get command is available"""
         try:
-            # Use the found mega-cmd path
-            cmd = [self.mega_cmd_path, '--version']
+            cmd = [self.mega_get_path, '--version']
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             return result.returncode == 0
         except Exception as e:
-            logger.error(f"Error checking mega-cmd: {e}")
+            logger.error(f"Error checking mega-get: {e}")
             return False
     
     def get_current_account(self) -> Optional[Dict]:
@@ -177,19 +177,50 @@ class MegaManager:
             self.current_account_index = (self.current_account_index + 1) % len(self.accounts)
             logger.info(f"Rotated to account: {self.get_current_account()['email']}")
     
-    def login_to_mega(self, email: str, password: str) -> Tuple[bool, str]:
+    def ensure_mega_session(self) -> bool:
+        """Ensure we're logged into Mega.nz using mega-get"""
         try:
-            # Logout first to ensure clean session
-            logout_cmd = f'{self.mega_cmd_path} -logout'
-            subprocess.run(logout_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            # Check if we're logged in by trying to list a dummy URL (it will fail if not logged in)
+            check_cmd = [self.mega_get_path, '--dryrun', 'https://mega.nz/file/dummy']
+            result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
             
-            # Login using mega-cmd with full path
-            login_cmd = f'{self.mega_cmd_path} -login "{email}" "{password}"'
-            logger.info(f"Executing login: {login_cmd}")
+            # If we get "Not logged in" error, we need to login
+            if "Not logged in" in result.stderr or "login" in result.stderr.lower():
+                logger.warning("Mega session not active, attempting login...")
+                return self.login_to_mega()
+            else:
+                logger.info("Mega session appears to be active")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error checking mega session: {e}")
+            return False
+    
+    def login_to_mega(self) -> bool:
+        """Login to Mega.nz using mega-get with the current account"""
+        try:
+            current_account = self.get_current_account()
+            if not current_account:
+                logger.error("No Mega account available for login")
+                return False
             
-            result = subprocess.run(login_cmd, shell=True, capture_output=True, text=True, timeout=30)
+            email = current_account['email']
+            password = current_account['password']
             
-            if result.returncode == 0:
+            # Login using mega-get
+            login_cmd = [
+                self.mega_get_path,
+                '--username', email,
+                '--password', password,
+                '--dryrun',  # Just test login, don't download
+                'https://mega.nz/file/dummy'
+            ]
+            
+            logger.info(f"Attempting login to Mega.nz with: {email}")
+            result = subprocess.run(login_cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0 or "Already logged in" in result.stderr:
+                logger.info(f"Login successful to: {email}")
                 # Save session info
                 session_info = {
                     'email': email,
@@ -197,28 +228,17 @@ class MegaManager:
                 }
                 with open(self.cred_file, 'w') as f:
                     json.dump(session_info, f)
-                return True, f"Login berhasil ke: {email}"
+                return True
             else:
                 error_msg = result.stderr if result.stderr else result.stdout
                 logger.error(f"Login failed: {error_msg}")
-                return False, f"Login gagal: {error_msg}"
-        except subprocess.TimeoutExpired:
-            return False, "Login timeout"
-        except Exception as e:
-            return False, f"Error: {str(e)}"
-    
-    def ensure_mega_session(self) -> bool:
-        try:
-            whoami_cmd = f'{self.mega_cmd_path} -whoami'
-            result = subprocess.run(whoami_cmd, shell=True, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                logger.info(f"Mega session active: {result.stdout.strip()}")
-                return True
-            else:
-                logger.warning("Mega session not active")
                 return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Login timeout")
+            return False
         except Exception as e:
-            logger.error(f"Error checking mega session: {e}")
+            logger.error(f"Error during login: {e}")
             return False
     
     def debug_mega_session(self) -> Dict:
@@ -226,13 +246,22 @@ class MegaManager:
         debug_info = {}
         
         try:
-            # Check whoami
-            whoami_cmd = f'{self.mega_cmd_path} -whoami'
-            result = subprocess.run(whoami_cmd, shell=True, capture_output=True, text=True, timeout=10)
-            debug_info['whoami'] = {
-                'returncode': result.returncode,
-                'stdout': result.stdout.strip(),
-                'stderr': result.stderr.strip()
+            # Check mega-get version
+            version_cmd = [self.mega_get_path, '--version']
+            version_result = subprocess.run(version_cmd, capture_output=True, text=True, timeout=10)
+            debug_info['version'] = {
+                'returncode': version_result.returncode,
+                'stdout': version_result.stdout.strip(),
+                'stderr': version_result.stderr.strip()
+            }
+            
+            # Check session status
+            session_cmd = [self.mega_get_path, '--dryrun', 'https://mega.nz/file/dummy']
+            session_result = subprocess.run(session_cmd, capture_output=True, text=True, timeout=10)
+            debug_info['session'] = {
+                'returncode': session_result.returncode,
+                'stdout': session_result.stdout.strip(),
+                'stderr': session_result.stderr.strip()
             }
             
             # Check disk space
@@ -242,6 +271,7 @@ class MegaManager:
             # Check if downloads directory exists and is writable
             download_test = DOWNLOAD_BASE / 'test_write'
             try:
+                download_test.parent.mkdir(parents=True, exist_ok=True)
                 download_test.touch()
                 debug_info['downloads_writable'] = True
                 download_test.unlink()
@@ -256,7 +286,7 @@ class MegaManager:
             return debug_info
     
     def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str]:
-        """Download folder from Mega.nz with detailed debugging"""
+        """Download folder from Mega.nz using mega-get"""
         try:
             logger.info(f"Starting download for job {job_id}: {folder_url} -> {download_path}")
             
@@ -264,16 +294,9 @@ class MegaManager:
             debug_info = self.debug_mega_session()
             logger.info(f"Mega debug info for {job_id}: {debug_info}")
             
+            # Ensure we're logged in
             if not self.ensure_mega_session():
-                # Try to login with current account
-                current_account = self.get_current_account()
-                if current_account:
-                    logger.info(f"Attempting login for {job_id} with: {current_account['email']}")
-                    success, message = self.login_to_mega(current_account['email'], current_account['password'])
-                    if not success:
-                        return False, f"Session invalid and login failed: {message}"
-                else:
-                    return False, "No Mega.nz account available"
+                return False, "Tidak dapat login ke Mega.nz. Periksa kredensial akun."
             
             # Create download directory
             download_path.mkdir(parents=True, exist_ok=True)
@@ -286,98 +309,77 @@ class MegaManager:
             except Exception as e:
                 return False, f"Cannot write to download directory: {str(e)}"
             
-            # First, let's check what's in the Mega.nz folder
-            logger.info(f"Checking Mega.nz folder contents for {job_id}")
-            ls_cmd = f'{self.mega_cmd_path} -ls {folder_url}'
-            ls_result = subprocess.run(ls_cmd, shell=True, capture_output=True, text=True, timeout=30)
+            # Change to download directory for mega-get
+            original_cwd = os.getcwd()
+            os.chdir(download_path)
             
-            logger.info(f"Mega-ls result for {job_id}: returncode={ls_result.returncode}, stdout={ls_result.stdout}, stderr={ls_result.stderr}")
-            
-            if ls_result.returncode != 0:
-                return False, f"Cannot access Mega.nz folder: {ls_result.stderr}"
-            
-            # Now attempt download
-            download_cmd = f'{self.mega_cmd_path} -get "{folder_url}" "{download_path}"'
-            logger.info(f"Executing download for {job_id}: {download_cmd}")
-            
-            # Execute download with longer timeout
-            start_time = time.time()
-            result = subprocess.run(download_cmd, shell=True, capture_output=True, text=True, timeout=7200)  # 2 hours
-            end_time = time.time()
-            
-            download_duration = end_time - start_time
-            logger.info(f"Download completed for {job_id} in {download_duration:.2f}s: returncode={result.returncode}")
-            
-            if result.returncode == 0:
-                # Wait for files to stabilize
-                time.sleep(10)
+            try:
+                # Now download using mega-get (same command that works manually)
+                download_cmd = [self.mega_get_path, folder_url]
+                logger.info(f"Executing download for {job_id}: {' '.join(download_cmd)}")
                 
-                # Check if files were actually downloaded - search recursively
-                all_files = list(download_path.rglob('*'))
-                files = [f for f in all_files if f.is_file()]
-                directories = [f for f in all_files if f.is_dir()]
+                # Execute download with longer timeout
+                start_time = time.time()
+                result = subprocess.run(download_cmd, capture_output=True, text=True, timeout=7200)  # 2 hours
+                end_time = time.time()
                 
-                logger.info(f"File check for {job_id}: {len(files)} files, {len(directories)} directories found")
+                download_duration = end_time - start_time
+                logger.info(f"Download completed for {job_id} in {download_duration:.2f}s: returncode={result.returncode}")
                 
-                # Log all files and directories for debugging
-                for f in files:
-                    logger.info(f"File: {f} ({f.stat().st_size} bytes)")
-                for d in directories:
-                    logger.info(f"Directory: {d}")
+                # Return to original directory
+                os.chdir(original_cwd)
                 
-                # Check if files exist in subdirectories (common Mega.nz behavior)
-                total_files = len(files)
-                
-                if total_files == 0:
-                    # Check if there's exactly one subdirectory (Mega.nz often creates one)
-                    if len(directories) == 1:
-                        subdir = directories[0]
-                        subdir_files = list(subdir.rglob('*'))
-                        actual_files = [f for f in subdir_files if f.is_file()]
-                        
-                        if len(actual_files) > 0:
-                            logger.info(f"Found {len(actual_files)} files in subdirectory {subdir}, moving to main directory")
-                            
-                            # Move all files from subdirectory to main download path
-                            for file_path in actual_files:
-                                try:
-                                    relative_path = file_path.relative_to(subdir)
-                                    new_path = download_path / relative_path
-                                    new_path.parent.mkdir(parents=True, exist_ok=True)
-                                    file_path.rename(new_path)
-                                    logger.info(f"Moved {file_path} to {new_path}")
-                                except Exception as e:
-                                    logger.error(f"Error moving file {file_path}: {e}")
-                            
-                            # Remove empty subdirectory
-                            try:
-                                shutil.rmtree(subdir)
-                            except:
-                                pass
-                            
-                            # Re-count files
-                            files = list(download_path.rglob('*'))
-                            files = [f for f in files if f.is_file()]
-                            total_files = len(files)
+                if result.returncode == 0:
+                    # Wait for files to stabilize
+                    time.sleep(5)
+                    
+                    # Check if files were actually downloaded
+                    all_files = list(download_path.rglob('*'))
+                    files = [f for f in all_files if f.is_file()]
+                    directories = [f for f in all_files if f.is_dir()]
+                    
+                    logger.info(f"File check for {job_id}: {len(files)} files, {len(directories)} directories found")
+                    
+                    # Log all files and directories for debugging
+                    for f in files:
+                        logger.info(f"File: {f} ({f.stat().st_size} bytes)")
+                    for d in directories:
+                        logger.info(f"Directory: {d}")
+                    
+                    total_files = len(files)
                     
                     if total_files == 0:
-                        # Still no files? Check the output for clues
+                        # Check output for clues
                         if "error" in result.stdout.lower() or "error" in result.stderr.lower():
-                            return False, f"Download completed with errors in output: {result.stdout} {result.stderr}"
+                            return False, f"Download completed with errors: {result.stdout} {result.stderr}"
                         elif "no such file" in result.stdout.lower() or "no such file" in result.stderr.lower():
-                            return False, "Folder not found or inaccessible"
+                            return False, "Folder tidak ditemukan atau tidak dapat diakses"
                         else:
-                            return False, "Download completed but no files were found in the folder"
-                
-                return True, f"Download berhasil! {total_files} files downloaded in {download_duration:.2f}s"
-            else:
-                error_msg = result.stderr if result.stderr else result.stdout
-                logger.error(f"Download command failed for {job_id}: {error_msg}")
-                return False, f"Download gagal: {error_msg}"
+                            return False, "Download selesai tetapi tidak ada file yang ditemukan di folder"
+                    
+                    return True, f"Download berhasil! {total_files} file diunduh dalam {download_duration:.2f}s"
+                else:
+                    error_msg = result.stderr if result.stderr else result.stdout
+                    logger.error(f"Download command failed for {job_id}: {error_msg}")
+                    
+                    # Try to parse common errors
+                    if "quota exceeded" in error_msg.lower():
+                        self.rotate_account()
+                        return False, "Quota akun habis, mencoba akun lain..."
+                    elif "not found" in error_msg.lower():
+                        return False, "Folder tidak ditemukan atau link tidak valid"
+                    elif "login" in error_msg.lower():
+                        return False, "Session login bermasalah, coba lagi nanti"
+                    else:
+                        return False, f"Download gagal: {error_msg}"
+                        
+            except Exception as e:
+                os.chdir(original_cwd)
+                raise e
                 
         except subprocess.TimeoutExpired:
             logger.error(f"Download timeout for {job_id}")
-            return False, "Download timeout (2 hours)"
+            return False, "Download timeout (2 jam)"
         except Exception as e:
             logger.error(f"Unexpected error in download for {job_id}: {e}")
             return False, f"Error: {str(e)}"
@@ -922,11 +924,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⚙️ SISTEM INFO:
 • Download Aktif: {download_processor.current_processes}/{MAX_CONCURRENT_DOWNLOADS}
 • Dalam Antrian: {download_queue.qsize()}
-• Mega.nz CMD: {'✅' if mega_manager.check_mega_cmd() else '❌'}
+• Mega-get CMD: {'✅' if mega_manager.check_mega_get() else '❌'}
 • Akun Tersedia: {len(mega_manager.accounts)}
 • Akun Saat Ini: {mega_manager.get_current_account()['email'] if mega_manager.get_current_account() else 'Tidak ada'}
+• Mega-get Path: {mega_manager.mega_get_path}
 • TeraboxUploaderCLI: {'✅' if TERABOX_CLI_DIR.exists() else '❌'}
-• Mega CMD Path: {mega_manager.mega_cmd_path}
     """
     
     full_text = active_text + "\n" + queue_text + "\n" + system_text
@@ -934,21 +936,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Debug command to check system status"""
-    user_id = update.effective_user.id
-    
-    # Check if user is authorized (you can add user ID checks here)
     debug_info = mega_manager.debug_mega_session()
     
     debug_text = "🔧 DEBUG INFORMATION:\n\n"
     
     # Mega.nz status
     debug_text += "MEGA.NZ STATUS:\n"
-    debug_text += f"• Mega-cmd available: {'✅' if mega_manager.check_mega_cmd() else '❌'}\n"
-    debug_text += f"• Mega-cmd path: {mega_manager.mega_cmd_path}\n"
-    debug_text += f"• Session active: {'✅' if mega_manager.ensure_mega_session() else '❌'}\n"
+    debug_text += f"• Mega-get available: {'✅' if mega_manager.check_mega_get() else '❌'}\n"
+    debug_text += f"• Mega-get path: {mega_manager.mega_get_path}\n"
+    debug_text += f"• Session active: {'✅' if 'session' in debug_info and debug_info['session']['returncode'] == 0 else '❌'}\n"
     
-    if 'whoami' in debug_info:
-        debug_text += f"• Whoami: {debug_info['whoami']['stdout']}\n"
+    if 'version' in debug_info:
+        debug_text += f"• Version: {debug_info['version']['stdout']}\n"
     
     # Disk space
     debug_text += f"• Downloads writable: {'✅' if debug_info.get('downloads_writable', False) else '❌'}\n"
@@ -1128,11 +1127,11 @@ def main():
     DOWNLOAD_BASE.mkdir(exist_ok=True)
     
     # Check Mega.nz installation
-    mega_available = mega_manager.check_mega_cmd()
+    mega_available = mega_manager.check_mega_get()
     if not mega_available:
-        logger.warning("Mega.nz CMD tidak terpasang! Install dengan: sudo snap install mega-cmd")
+        logger.warning("mega-get tidak terpasang! Pastikan mega-cmd sudah terinstall dengan: sudo snap install mega-cmd")
     else:
-        logger.info("Mega.nz CMD terdeteksi")
+        logger.info("mega-get terdeteksi")
     
     # Check if accounts are configured
     if not mega_manager.accounts:
