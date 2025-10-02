@@ -12,7 +12,6 @@ from queue import Queue
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 from enum import Enum
-import urllib.parse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -41,7 +40,7 @@ logger = logging.getLogger(__name__)
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.mpeg'}
 DOWNLOAD_BASE = Path('downloads')
-TERABOX_CLI_PATH = Path('teraboxcli/main.py')
+TERABOX_CLI_DIR = Path('TeraboxUploaderCLI')
 MAX_CONCURRENT_DOWNLOADS = 2
 
 # Global state
@@ -257,48 +256,51 @@ class UploadManager:
     def __init__(self):
         self.terabox_key = os.getenv('TERABOX_CONNECT_KEY')
         self.doodstream_key = os.getenv('DOODSTREAM_API_KEY')
+        self.terabox_lock = threading.Lock()
     
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox using teraboxcli"""
+        """Upload files to Terabox using TeraboxUploaderCLI"""
         try:
-            await self.send_progress_message(update, context, job_id, "📤 Memulai upload ke Terabox...")
-            
-            if not TERABOX_CLI_PATH.exists():
-                await self.send_progress_message(update, context, job_id, "❌ Terabox CLI tidak ditemukan!")
+            if not TERABOX_CLI_DIR.exists():
+                await self.send_progress_message(update, context, job_id, "❌ TeraboxUploaderCLI tidak ditemukan!")
                 return []
             
-            links = []
-            files = [f for f in folder_path.rglob('*') if f.is_file()]
-            total_files = len(files)
-            uploaded_count = 0
+            await self.send_progress_message(update, context, job_id, "📤 Memulai upload ke Terabox menggunakan TeraboxUploaderCLI...")
             
-            for file_path in files:
-                if not self.is_job_active(job_id):
-                    break
-                    
+            # Use lock to prevent multiple concurrent Terabox uploads
+            with self.terabox_lock:
+                # Run TeraboxUploaderCLI
+                old_cwd = os.getcwd()
+                os.chdir(TERABOX_CLI_DIR)
+                
                 try:
-                    cmd = ['python3', str(TERABOX_CLI_PATH), 'upload', str(file_path)]
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    # Run the uploader for the specific folder
+                    cmd = ['python', 'main.py', '--source', str(folder_path)]
+                    logger.info(f"Executing TeraboxUploaderCLI: {cmd}")
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
                     
                     if result.returncode == 0:
-                        # Extract link from output
-                        link_match = re.search(r'https?://[^\s]+', result.stdout)
-                        if link_match:
-                            links.append(link_match.group())
-                            uploaded_count += 1
-                            await self.send_progress_message(
-                                update, context, job_id,
-                                f"📤 Upload progress: {uploaded_count}/{total_files}\n✅ {file_path.name}"
-                            )
-                    else:
+                        # Parse output for success
                         await self.send_progress_message(
                             update, context, job_id,
-                            f"❌ Upload gagal: {file_path.name}"
+                            f"✅ Upload ke Terabox selesai!\n"
+                            f"Folder: {folder_path.name}\n"
+                            f"File telah diupload ke akun Terabox"
                         )
-                except Exception as e:
-                    logger.error(f"Upload error for {file_path}: {e}")
-            
-            return links
+                        return ["Upload completed - check your Terabox account"]
+                    else:
+                        error_msg = result.stderr if result.stderr else result.stdout
+                        raise Exception(f"TeraboxUploaderCLI failed: {error_msg}")
+                        
+                finally:
+                    os.chdir(old_cwd)
+                    
+        except subprocess.TimeoutExpired:
+            error_msg = "Upload timeout (1 hour)"
+            logger.error(f"Terabox upload timeout: {error_msg}")
+            await self.send_progress_message(update, context, job_id, f"❌ Upload timeout: {error_msg}")
+            return []
         except Exception as e:
             logger.error(f"Terabox upload error: {e}")
             await self.send_progress_message(update, context, job_id, f"❌ Error upload: {str(e)}")
@@ -318,6 +320,10 @@ class UploadManager:
                           if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS]
             total_files = len(video_files)
             uploaded_count = 0
+            
+            if total_files == 0:
+                await self.send_progress_message(update, context, job_id, "📭 Tidak ada file video untuk diupload")
+                return []
             
             for file_path in video_files:
                 if not self.is_job_active(job_id):
@@ -371,6 +377,9 @@ class UploadManager:
     async def send_progress_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, message: str):
         """Send or update progress message"""
         try:
+            if job_id not in active_downloads:
+                return
+                
             chat_id = active_downloads[job_id]['chat_id']
             
             # Store the latest progress message for this job
@@ -379,7 +388,8 @@ class UploadManager:
                     await context.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=active_downloads[job_id]['progress_message_id'],
-                        text=f"**{active_downloads[job_id]['folder_name']}**\n{message}"
+                        text=f"**{active_downloads[job_id]['folder_name']}**\n{message}",
+                        parse_mode='Markdown'
                     )
                     return
                 except Exception:
@@ -507,19 +517,23 @@ class DownloadProcessor:
                 else:
                     links = await self.upload_manager.upload_to_doodstream(download_path, update, context, job_id)
                 
-                await self.upload_manager.send_progress_message(
-                    update, context, job_id,
-                    f"✅ Upload selesai!\n"
-                    f"🔗 {len(links)} links generated"
-                )
+                # Don't send duplicate success message for Terabox
+                if platform != 'terabox':
+                    await self.upload_manager.send_progress_message(
+                        update, context, job_id,
+                        f"✅ Upload selesai!\n🔗 {len(links)} links generated"
+                    )
             
             # Auto-cleanup if enabled
             if user_settings.get('auto_cleanup', True):
                 try:
-                    shutil.rmtree(download_path)
-                    await self.upload_manager.send_progress_message(
-                        update, context, job_id, "🧹 Auto-cleanup selesai!"
-                    )
+                    # For Terabox, files might be deleted by TeraboxUploaderCLI
+                    # For Doodstream, we need to cleanup manually
+                    if os.path.exists(download_path):
+                        shutil.rmtree(download_path)
+                        await self.upload_manager.send_progress_message(
+                            update, context, job_id, "🧹 Auto-cleanup selesai!"
+                        )
                 except Exception as e:
                     logger.error(f"Cleanup error: {e}")
             
@@ -717,6 +731,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Mega.nz CMD: {'✅' if mega_manager.check_mega_cmd() else '❌'}
 • Akun Tersedia: {len(mega_manager.accounts)}
 • Akun Saat Ini: {mega_manager.get_current_account()['email'] if mega_manager.get_current_account() else 'Tidak ada'}
+• TeraboxUploaderCLI: {'✅' if TERABOX_CLI_DIR.exists() else '❌'}
     """
     
     full_text = active_text + "\n" + queue_text + "\n" + system_text
@@ -870,8 +885,9 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Cleanup if enabled
     if settings.get('auto_cleanup', True):
         try:
-            shutil.rmtree(folder_path)
-            await update.message.reply_text("🧹 Auto-cleanup selesai!")
+            if os.path.exists(folder_path):
+                shutil.rmtree(folder_path)
+                await update.message.reply_text("🧹 Auto-cleanup selesai!")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
     
@@ -879,7 +895,10 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if job_id in active_downloads:
         del active_downloads[job_id]
     
-    await update.message.reply_text(f"✅ Upload selesai! {len(links)} links generated")
+    if platform == 'terabox':
+        await update.message.reply_text(f"✅ Upload selesai! File telah diupload ke Terabox")
+    else:
+        await update.message.reply_text(f"✅ Upload selesai! {len(links)} links generated")
 
 def main():
     """Start the bot"""
@@ -893,6 +912,10 @@ def main():
     # Check if accounts are configured
     if not mega_manager.accounts:
         logger.warning("Tidak ada akun Mega.nz yang dikonfigurasi!")
+    
+    # Check TeraboxUploaderCLI
+    if not TERABOX_CLI_DIR.exists():
+        logger.warning("TeraboxUploaderCLI tidak ditemukan! Pastikan sudah di-clone di direktori ini.")
     
     # Initialize bot
     token = os.getenv('BOT_TOKEN')
