@@ -99,6 +99,30 @@ class MegaManager:
         # Load mega accounts from environment or file
         self.accounts = self.load_mega_accounts()
         self.current_account_index = 0
+        # Get mega command path
+        self.mega_cmd_path = self._get_mega_cmd_path()
+    
+    def _get_mega_cmd_path(self) -> str:
+        """Get the correct path for mega commands"""
+        # Try multiple possible paths
+        possible_paths = [
+            '/snap/bin/mega-cmd',
+            '/usr/bin/mega-cmd',
+            '/usr/local/bin/mega-cmd',
+            'mega-cmd'  # Fallback to PATH
+        ]
+        
+        for path in possible_paths:
+            try:
+                result = subprocess.run(['which', path], capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info(f"Found mega-cmd at: {path}")
+                    return path
+            except:
+                continue
+        
+        logger.warning("Mega-cmd not found in standard paths, using 'mega-cmd'")
+        return "mega-cmd"
     
     def load_mega_accounts(self) -> List[Dict]:
         """Load mega accounts from environment variables"""
@@ -133,23 +157,10 @@ class MegaManager:
     
     def check_mega_cmd(self) -> bool:
         try:
-            # Try multiple commands to check mega-cmd
-            commands = [
-                ['mega-version'],
-                ['mega-cmd', '--version'],
-                ['which', 'mega-cmd'],
-                ['mega-help']
-            ]
-            
-            for cmd in commands:
-                try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0:
-                        logger.info(f"Mega-cmd found with: {cmd}")
-                        return True
-                except:
-                    continue
-            return False
+            # Use the found mega-cmd path
+            cmd = [self.mega_cmd_path, '--version']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            return result.returncode == 0
         except Exception as e:
             logger.error(f"Error checking mega-cmd: {e}")
             return False
@@ -167,10 +178,14 @@ class MegaManager:
     def login_to_mega(self, email: str, password: str) -> Tuple[bool, str]:
         try:
             # Logout first to ensure clean session
-            subprocess.run('mega-logout', shell=True, capture_output=True, text=True, timeout=10)
+            logout_cmd = f'{self.mega_cmd_path} -logout'
+            subprocess.run(logout_cmd, shell=True, capture_output=True, text=True, timeout=10)
             
-            cmd = f'mega-login "{email}" "{password}"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            # Login using mega-cmd with full path
+            login_cmd = f'{self.mega_cmd_path} -login "{email}" "{password}"'
+            logger.info(f"Executing login: {login_cmd}")
+            
+            result = subprocess.run(login_cmd, shell=True, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
                 # Save session info
@@ -182,7 +197,8 @@ class MegaManager:
                     json.dump(session_info, f)
                 return True, f"Login berhasil ke: {email}"
             else:
-                error_msg = result.stderr if result.stderr else "Unknown error"
+                error_msg = result.stderr if result.stderr else result.stdout
+                logger.error(f"Login failed: {error_msg}")
                 return False, f"Login gagal: {error_msg}"
         except subprocess.TimeoutExpired:
             return False, "Login timeout"
@@ -191,7 +207,8 @@ class MegaManager:
     
     def ensure_mega_session(self) -> bool:
         try:
-            result = subprocess.run('mega-whoami', shell=True, capture_output=True, text=True, timeout=10)
+            whoami_cmd = f'{self.mega_cmd_path} -whoami'
+            result = subprocess.run(whoami_cmd, shell=True, capture_output=True, text=True, timeout=10)
             return result.returncode == 0
         except Exception:
             return False
@@ -211,15 +228,15 @@ class MegaManager:
             # Create download directory
             download_path.mkdir(parents=True, exist_ok=True)
             
-            cmd = f'mega-get "{folder_url}" "{download_path}"'
-            logger.info(f"Executing download: {cmd}")
+            download_cmd = f'{self.mega_cmd_path} -get "{folder_url}" "{download_path}"'
+            logger.info(f"Executing download: {download_cmd}")
             
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=3600)
+            result = subprocess.run(download_cmd, shell=True, capture_output=True, text=True, timeout=3600)
             
             if result.returncode == 0:
                 return True, f"Download berhasil!"
             else:
-                error_msg = result.stderr if result.stderr else "Unknown error"
+                error_msg = result.stderr if result.stderr else result.stdout
                 return False, f"Download gagal: {error_msg}"
         except subprocess.TimeoutExpired:
             return False, "Download timeout (1 hour)"
@@ -230,9 +247,6 @@ class FileManager:
     @staticmethod
     def auto_rename_media_files(folder_path: Path, prefix: str) -> Dict:
         try:
-            photo_count = 0
-            video_count = 0
-            
             # Find all media files recursively
             media_files = []
             for ext in PHOTO_EXTENSIONS | VIDEO_EXTENSIONS:
@@ -242,31 +256,30 @@ class FileManager:
             # Sort files naturally
             media_files.sort()
             
-            # Rename photos and videos separately
-            for file_path in media_files:
-                if file_path.suffix.lower() in PHOTO_EXTENSIONS:
-                    photo_count += 1
-                    new_name = f"{prefix}pic_{photo_count:04d}{file_path.suffix}"
-                    new_path = file_path.parent / new_name
-                elif file_path.suffix.lower() in VIDEO_EXTENSIONS:
-                    video_count += 1
-                    new_name = f"{prefix}vid_{video_count:04d}{file_path.suffix}"
-                    new_path = file_path.parent / new_name
-                else:
-                    continue
+            total_files = len(media_files)
+            renamed_count = 0
+            
+            for number, file_path in enumerate(media_files, 1):
+                # Format number with leading zero for 1-9
+                number_str = f"{number:02d}"  # This will give 01, 02, ..., 10, 11, etc.
+                
+                # Create new name: prefix + space + number + extension
+                new_name = f"{prefix} {number_str}{file_path.suffix}"
+                new_path = file_path.parent / new_name
                 
                 # Rename file
                 try:
                     if file_path != new_path:
                         file_path.rename(new_path)
+                        renamed_count += 1
                 except Exception as e:
                     logger.error(f"Error renaming {file_path}: {e}")
                     continue
             
-            return {'photos': photo_count, 'videos': video_count}
+            return {'renamed': renamed_count, 'total': total_files}
         except Exception as e:
             logger.error(f"Error in auto_rename: {e}")
-            return {'photos': 0, 'videos': 0}
+            return {'renamed': 0, 'total': 0}
 
 class UploadManager:
     def __init__(self):
@@ -512,8 +525,7 @@ class DownloadProcessor:
             await self.upload_manager.send_progress_message(
                 update, context, job_id,
                 f"📝 Rename selesai:\n"
-                f"📷 Foto: {rename_result['photos']} files\n"
-                f"🎥 Video: {rename_result['videos']} files"
+                f"📁 {rename_result['renamed']} files renamed dari total {rename_result['total']} files"
             )
             
             # Auto-upload if enabled
@@ -745,6 +757,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Akun Tersedia: {len(mega_manager.accounts)}
 • Akun Saat Ini: {mega_manager.get_current_account()['email'] if mega_manager.get_current_account() else 'Tidak ada'}
 • TeraboxUploaderCLI: {'✅' if TERABOX_CLI_DIR.exists() else '❌'}
+• Mega CMD Path: {mega_manager.mega_cmd_path}
     """
     
     full_text = active_text + "\n" + queue_text + "\n" + system_text
@@ -755,12 +768,12 @@ async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "❌ Format: /setprefix <prefix>\n"
-            "Contoh: /setprefix 😍\n"
-            "Contoh: /setprefix mypic_"
+            "Contoh: /setprefix TELEGRAM @missyhot22\n"
+            "Contoh: /setprefix my files"
         )
         return
     
-    prefix = context.args[0]
+    prefix = " ".join(context.args)  # Support spaces in prefix
     user_id = update.effective_user.id
     
     settings_manager.update_user_settings(user_id, {'prefix': prefix})
@@ -768,8 +781,8 @@ async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Prefix Diubah\n\n"
         f"Prefix baru: {prefix}\n"
-        f"Contoh file: {prefix}pic_0001.jpg\n"
-        f"{prefix}vid_0001.mp4"
+        f"Contoh file: {prefix} 01.jpg\n"
+        f"{prefix} 02.mp4"
     )
 
 async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
