@@ -15,7 +15,7 @@ from pathlib import Path
 from enum import Enum
 import psutil
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     ContextTypes, MessageHandler, filters
@@ -1062,24 +1062,24 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 # Start download processor
 download_processor.start_processing()
 
-# Telegram Bot Handlers
+# Telegram Bot Handlers - PERBAIKAN: Hapus format HTML/Markdown yang bermasalah
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message when the command /start is issued."""
     user = update.effective_user
     welcome_text = f"""
-🤖 **Mega Downloader Bot**
+🤖 Mega Downloader Bot
 
-Halo {user.mention_html()}!
+Halo {user.first_name}!
 
 Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berbagai platform.
 
-**Fitur:**
+Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
 📤 Upload ke Terabox/Doodstream
 ⚙️ Customizable settings
 
-**Commands:**
+Commands:
 /download <url> - Download folder Mega.nz
 /upload <path> - Upload folder manual
 /status - Lihat status download
@@ -1091,32 +1091,32 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 /debug - Info debug system
 /cleanup - Bersihkan file temporary
 
-Contoh: `/download https://mega.nz/folder/abc123`
+Contoh: /download https://mega.nz/folder/abc123
     """
-    await update.message.reply_html(welcome_text)
+    await update.message.reply_text(welcome_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send help message"""
     help_text = """
-**📖 Bantuan Mega Downloader Bot**
+📖 Bantuan Mega Downloader Bot
 
-**Cara penggunaan:**
-1. Kirim command `/download` diikuti URL folder Mega.nz
+Cara penggunaan:
+1. Kirim command /download diikuti URL folder Mega.nz
 2. Bot akan otomatis mendownload, rename, dan upload file
 3. Pantau progress melalui status message
 
-**Pengaturan yang tersedia:**
-- `prefix`: Nama prefix untuk file setelah di-rename
-- `platform`: Platform upload (terabox/doodstream)  
-- `auto_upload`: Auto upload setelah download
-- `auto_cleanup`: Hapus file lokal setelah upload
+Pengaturan yang tersedia:
+- prefix: Nama prefix untuk file setelah di-rename
+- platform: Platform upload (terabox/doodstream)  
+- auto_upload: Auto upload setelah download
+- auto_cleanup: Hapus file lokal setelah upload
 
-**Contoh commands:**
-`/download https://mega.nz/folder/abc123`
-`/setprefix my_files`
-`/setplatform terabox`
-`/autoupload on`
-`/status`
+Contoh commands:
+/download https://mega.nz/folder/abc123
+/setprefix my_files
+/setplatform terabox
+/autoupload on
+/status
     """
     await update.message.reply_text(help_text)
 
@@ -1180,12 +1180,12 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         auto_upload = user_settings.get('auto_upload', True)
         
         response_text = (
-            f"✅ **Download Job Ditambahkan**\n\n"
-            f"📁 **Folder:** {folder_name}\n"
-            f"🔗 **URL:** {mega_url}\n"
-            f"🆔 **Job ID:** {job_id}\n"
-            f"📊 **Antrian:** {download_queue.qsize() + 1}\n\n"
-            f"⚙️ **Pengaturan:**\n"
+            f"✅ Download Job Ditambahkan\n\n"
+            f"📁 Folder: {folder_name}\n"
+            f"🔗 URL: {mega_url}\n"
+            f"🆔 Job ID: {job_id}\n"
+            f"📊 Antrian: {download_queue.qsize() + 1}\n\n"
+            f"⚙️ Pengaturan:\n"
             f"• Platform: {platform}\n"
             f"• Auto Upload: {'✅' if auto_upload else '❌'}\n\n"
             f"Gunakan /status untuk memantau progress."
@@ -1262,16 +1262,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_status = SystemMonitor.get_system_status()
         
         status_text = f"""
-**📊 System Status**
+📊 System Status
 💾 Disk: {system_status.get('disk_free_gb', 0):.1f}GB free
 🔄 Active Downloads: {system_status.get('active_downloads', 0)}
 📋 Queue Size: {system_status.get('queue_size', 0)}
 
-**👤 Your Jobs**
+👤 Your Jobs
 ⏳ Active: {len(user_active_jobs)}
 ✅ Completed: {len(user_completed_jobs)}
 
-**Active Jobs:**
+Active Jobs:
 """
         
         if user_active_jobs:
@@ -1283,7 +1283,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             status_text += "\nTidak ada active jobs"
         
-        status_text += f"\n**Completed Jobs (last 3):**"
+        status_text += f"\nCompleted Jobs (last 3):"
         
         if user_completed_jobs:
             for job_id, job in list(user_completed_jobs.items())[-3:]:  # Show last 3
@@ -1308,19 +1308,19 @@ async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_T
         system_status = SystemMonitor.get_system_status()
         
         status_text = f"""
-**🔢 Terabox Job Counter Status**
+🔢 Terabox Job Counter Status
 
-**Counter Info:**
+Counter Info:
 🔄 Current Job Counter: #{counter_status['current_job_counter']}
 📂 Next Folder: {counter_status['next_folder']}
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
-**System Resources:**
+System Resources:
 💾 Disk Free: {system_status.get('disk_free_gb', 0):.1f}GB
 🧠 Memory Used: {system_status.get('memory_used_percent', 0):.1f}%
 ⚡ CPU Used: {system_status.get('cpu_used_percent', 0):.1f}%
 
-**Active Processes:**
+Active Processes:
 📥 Download Processes: {system_status.get('active_processes', 0)}
 🔄 Active Downloads: {system_status.get('active_downloads', 0)}
 📋 Queue Size: {system_status.get('queue_size', 0)}
@@ -1339,27 +1339,27 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_status = SystemMonitor.get_system_status()
         
         debug_text = f"""
-**🐛 Debug Information**
+🐛 Debug Information
 
-**Mega.nz Status:**
+Mega.nz Status:
 ✅ mega-get Available: {debug_info.get('mega_get_exists', False)}
 📂 Downloads Writable: {debug_info.get('downloads_writable', False)}
 🔑 Accounts: {debug_info.get('total_accounts', 0)}
 📧 Current Account: {debug_info.get('current_account', 'None')}
 
-**System Resources:**
+System Resources:
 💾 Disk Free: {system_status.get('disk_free_gb', 0):.1f}GB / {system_status.get('disk_total_gb', 0):.1f}GB
 💾 Disk Used: {system_status.get('disk_used_percent', 0):.1f}%
 🧠 Memory Free: {system_status.get('memory_free_gb', 0):.1f}GB
 🧠 Memory Used: {system_status.get('memory_used_percent', 0):.1f}%
 ⚡ CPU Used: {system_status.get('cpu_used_percent', 0):.1f}%
 
-**Bot Status:**
+Bot Status:
 🔄 Active Downloads: {system_status.get('active_downloads', 0)}
 📋 Queue Size: {system_status.get('queue_size', 0)}
 🔢 Active Processes: {system_status.get('active_processes', 0)}
 
-**Terabox Status:**
+Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
 📂 Next Folder: {upload_manager.get_job_counter_status().get('next_folder', 'Unknown')}
         """
@@ -1385,7 +1385,7 @@ async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         settings_manager.update_user_settings(user_id, {'prefix': prefix})
         
-        await update.message.reply_text(f"✅ Prefix berhasil diubah menjadi: `{prefix}`", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ Prefix berhasil diubah menjadi: {prefix}")
         
     except Exception as e:
         logger.error(f"💥 Error in set_prefix: {e}")
@@ -1412,7 +1412,7 @@ async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         settings_manager.update_user_settings(user_id, {'platform': platform})
         
-        await update.message.reply_text(f"✅ Platform upload berhasil diubah ke: `{platform}`", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ Platform upload berhasil diubah ke: {platform}")
         
     except Exception as e:
         logger.error(f"💥 Error in set_platform: {e}")
@@ -1438,7 +1438,7 @@ async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE)
         settings_manager.update_user_settings(user_id, {'auto_upload': auto_upload})
         
         status = "AKTIF" if auto_upload else "NON-AKTIF"
-        await update.message.reply_text(f"✅ Auto upload diubah menjadi: `{status}`", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ Auto upload diubah menjadi: {status}")
         
     except Exception as e:
         logger.error(f"💥 Error in auto_upload_toggle: {e}")
@@ -1464,7 +1464,7 @@ async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE
         settings_manager.update_user_settings(user_id, {'auto_cleanup': auto_cleanup})
         
         status = "AKTIF" if auto_cleanup else "NON-AKTIF"
-        await update.message.reply_text(f"✅ Auto cleanup diubah menjadi: `{status}`", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ Auto cleanup diubah menjadi: {status}")
         
     except Exception as e:
         logger.error(f"💥 Error in auto_cleanup_toggle: {e}")
@@ -1477,22 +1477,22 @@ async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = settings_manager.get_user_settings(user_id)
         
         settings_text = f"""
-**⚙️ Pengaturan Anda**
+⚙️ Pengaturan Anda
 
-📝 **Prefix:** `{settings.get('prefix', 'file_')}`
-📤 **Platform:** `{settings.get('platform', 'terabox')}`
-🔄 **Auto Upload:** `{'✅' if settings.get('auto_upload', True) else '❌'}`
-🧹 **Auto Cleanup:** `{'✅' if settings.get('auto_cleanup', True) else '❌'}`
-🔄 **Max Retries:** `{settings.get('max_retries', 3)}`
+📝 Prefix: {settings.get('prefix', 'file_')}
+📤 Platform: {settings.get('platform', 'terabox')}
+🔄 Auto Upload: {'✅' if settings.get('auto_upload', True) else '❌'}
+🧹 Auto Cleanup: {'✅' if settings.get('auto_cleanup', True) else '❌'}
+🔄 Max Retries: {settings.get('max_retries', 3)}
 
-**Commands untuk mengubah:**
-`/setprefix <prefix>` - Ubah file prefix
-`/setplatform <terabox|doodstream>` - Ubah platform
-`/autoupload <on|off>` - Toggle auto upload  
-`/autocleanup <on|off>` - Toggle auto cleanup
+Commands untuk mengubah:
+/setprefix <prefix> - Ubah file prefix
+/setplatform <terabox|doodstream> - Ubah platform
+/autoupload <on|off> - Toggle auto upload  
+/autocleanup <on|off> - Toggle auto cleanup
         """
         
-        await update.message.reply_text(settings_text, parse_mode='Markdown')
+        await update.message.reply_text(settings_text)
         
     except Exception as e:
         logger.error(f"💥 Error in my_settings: {e}")
