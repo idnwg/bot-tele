@@ -435,13 +435,15 @@ class TeraboxSeleniumUploader:
     def __init__(self):
         self.driver = None
         self.wait = None
-        logger.info("🌐 TeraboxSeleniumUploader initialized")
+        self.terabox_email = os.getenv('TERABOX_EMAIL')
+        self.terabox_password = os.getenv('TERABOX_PASSWORD')
+        logger.info("🌐 TeraboxSeleniumUploader initialized dengan login automation")
     
     def setup_driver(self):
         """Setup Chrome driver untuk automation"""
         try:
             chrome_options = Options()
-            # chrome_options.add_argument('--headless')  # Comment dulu untuk debugging
+            chrome_options.add_argument('--headless')  # Run in background
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
@@ -455,77 +457,296 @@ class TeraboxSeleniumUploader:
         except Exception as e:
             logger.error(f"❌ Failed to setup Chrome driver: {e}")
             return False
-    
-    def upload_folder_via_selenium(self, folder_path: Path) -> List[str]:
-        """Upload folder menggunakan Selenium automation"""
+
+    def login_to_terabox(self) -> bool:
+        """Login ke Terabox menggunakan email dan password"""
         try:
-            if not self.setup_driver():
-                return []
+            logger.info("🔐 Attempting to login to Terabox")
             
-            logger.info(f"🚀 Starting Selenium upload for folder: {folder_path}")
-            
-            # Buka halaman utama Terabox
-            self.driver.get("https://www.terabox.com")
-            time.sleep(5)
-            
-            # Cek jika perlu login (tampilkan info untuk user)
+            # Cek jika sudah login dengan melihat element share page
             try:
-                login_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Login') or contains(text(), 'Sign in') or contains(text(), '登录')]")
-                if login_elements:
-                    logger.warning("⚠️ Please login to Terabox manually in the browser window that opened")
-                    input("Press Enter after you have logged in to Terabox...")
+                share_elements = self.driver.find_elements(By.CSS_SELECTOR, "div.source-arr-item")
+                if share_elements:
+                    logger.info("✅ Already logged in to Terabox")
+                    return True
             except:
                 pass
             
-            # Cari dan klik tombol upload
-            logger.info("🔍 Looking for upload button...")
-            
-            # Coba berbagai selector untuk tombol upload
-            upload_selectors = [
-                "//div[contains(@class, 'upload')]",
-                "//button[contains(@class, 'upload')]", 
-                "//span[contains(@class, 'upload')]",
-                "//a[contains(@class, 'upload')]",
-                "//*[contains(text(), 'Upload')]",
-                "//*[contains(text(), '上传')]",
-                "//div[contains(@class, 'add-local-file')]",
-                "//*[contains(@class, 'source-arr-item')]"
+            # Cari tombol login
+            login_selectors = [
+                "div.login-btn",
+                "//span[contains(text(), 'Log in')]",
+                "//button[contains(text(), 'Login')]"
             ]
             
-            upload_button = None
-            for selector in upload_selectors:
+            login_btn = None
+            for selector in login_selectors:
                 try:
-                    upload_button = self.driver.find_element(By.XPATH, selector)
-                    if upload_button.is_displayed():
-                        logger.info(f"✅ Found upload button with selector: {selector}")
+                    if selector.startswith("//"):
+                        login_btn = self.driver.find_element(By.XPATH, selector)
+                    else:
+                        login_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    
+                    if login_btn.is_displayed():
+                        logger.info(f"✅ Found login button: {selector}")
+                        login_btn.click()
+                        time.sleep(3)
                         break
                     else:
-                        upload_button = None
+                        login_btn = None
                 except:
                     continue
             
-            if not upload_button:
-                # Screenshot untuk debugging
-                self.driver.save_screenshot("upload_button_not_found.png")
-                logger.error("❌ Could not find upload button")
-                return []
+            if not login_btn:
+                logger.error("❌ Login button not found")
+                return False
             
-            # Click upload button
-            self.driver.execute_script("arguments[0].click();", upload_button)
+            # Tunggu form login muncul
             time.sleep(3)
             
-            # Cari opsi "Local File" atau input file
-            logger.info("🔍 Looking for file input or local file option...")
+            # Input email
+            email_selectors = [
+                "input#email-input",
+                "input[placeholder*='email']",
+                "input[type='email']"
+            ]
             
-            # Coba cari input file langsung
+            email_input = None
+            for selector in email_selectors:
+                try:
+                    email_input = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    if email_input.is_displayed():
+                        logger.info(f"✅ Found email input: {selector}")
+                        email_input.clear()
+                        email_input.send_keys(self.terabox_email)
+                        time.sleep(1)
+                        break
+                    else:
+                        email_input = None
+                except:
+                    continue
+            
+            if not email_input:
+                logger.error("❌ Email input not found")
+                return False
+            
+            # Input password
+            password_selectors = [
+                "input#pwd-input", 
+                "input[type='password']",
+                "input[placeholder*='password']"
+            ]
+            
+            password_input = None
+            for selector in password_selectors:
+                try:
+                    password_input = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    if password_input.is_displayed():
+                        logger.info(f"✅ Found password input: {selector}")
+                        password_input.clear()
+                        password_input.send_keys(self.terabox_password)
+                        time.sleep(1)
+                        break
+                    else:
+                        password_input = None
+                except:
+                    continue
+            
+            if not password_input:
+                logger.error("❌ Password input not found")
+                return False
+            
+            # Klik tombol login
+            login_submit_selectors = [
+                "div.btn-class-login",
+                "//div[contains(text(), 'Login')]",
+                "button[type='submit']"
+            ]
+            
+            login_submit_btn = None
+            for selector in login_submit_selectors:
+                try:
+                    if selector.startswith("//"):
+                        login_submit_btn = self.driver.find_element(By.XPATH, selector)
+                    else:
+                        login_submit_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    
+                    if login_submit_btn.is_displayed():
+                        logger.info(f"✅ Found login submit button: {selector}")
+                        login_submit_btn.click()
+                        break
+                    else:
+                        login_submit_btn = None
+                except:
+                    continue
+            
+            if not login_submit_btn:
+                logger.error("❌ Login submit button not found")
+                return False
+            
+            # Tunggu proses login
+            logger.info("⏳ Waiting for login process...")
+            time.sleep(10)
+            
+            # Verifikasi login berhasil dengan mengecek halaman share
+            try:
+                self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.source-arr-item")))
+                logger.info("✅ Login successful! Redirected to share page")
+                return True
+            except:
+                logger.error("❌ Login failed - not redirected to share page")
+                self.driver.save_screenshot("login_failed.png")
+                return False
+                
+        except Exception as e:
+            logger.error(f"💥 Login error: {e}")
+            self.driver.save_screenshot("login_error.png")
+            return False
+
+    def ensure_share_page(self) -> bool:
+        """Pastikan berada di halaman share yang benar"""
+        try:
+            current_url = self.driver.current_url
+            if "webmaster/new/share" in current_url:
+                logger.info("✅ Already on correct share page")
+                return True
+            
+            # Jika tidak di share page, coba navigasi ke share page
+            logger.info("🔄 Navigating to share page...")
+            
+            # Coba klik tab Share di sidebar
+            share_tab_selectors = [
+                "//span[contains(@class, 'tabs-custom-wrap')]//div[contains(text(), 'Share')]",
+                "//div[contains(text(), 'Share')]",
+                "//*[contains(text(), 'Share')]"
+            ]
+            
+            for selector in share_tab_selectors:
+                try:
+                    share_tab = self.driver.find_element(By.XPATH, selector)
+                    if share_tab.is_displayed():
+                        logger.info(f"✅ Found share tab: {selector}")
+                        share_tab.click()
+                        time.sleep(5)
+                        
+                        # Verifikasi sudah di share page
+                        if "webmaster/new/share" in self.driver.current_url:
+                            logger.info("✅ Successfully navigated to share page")
+                            return True
+                except:
+                    continue
+            
+            # Jika tidak berhasil, buka langsung URL share
+            logger.info("🌐 Directly opening share page URL...")
+            self.driver.get("https://dm.1024tera.com/webmaster/new/share")
+            time.sleep(5)
+            
+            if "webmaster/new/share" in self.driver.current_url:
+                logger.info("✅ Successfully opened share page")
+                return True
+            else:
+                logger.error("❌ Failed to navigate to share page")
+                return False
+                
+        except Exception as e:
+            logger.error(f"💥 Error ensuring share page: {e}")
+            return False
+
+    def upload_folder_via_selenium(self, folder_path: Path) -> List[str]:
+        """Upload folder menggunakan Selenium automation dengan element yang tepat"""
+        try:
+            if not self.setup_driver():
+                return []
+
+            logger.info(f"🚀 Starting Selenium upload for folder: {folder_path}")
+            
+            # Buka halaman upload Terabox (webmaster center)
+            self.driver.get("https://dm.1024tera.com/webmaster/new/share")
+            time.sleep(5)
+            
+            # Cek dan lakukan login jika diperlukan
+            if not self.login_to_terabox():
+                logger.error("❌ Login failed, cannot proceed with upload")
+                return []
+            
+            # Pastikan berada di halaman share yang benar
+            if not self.ensure_share_page():
+                logger.error("❌ Not on correct share page, cannot proceed")
+                return []
+            
+            # Tunggu dan klik "Local File" berdasarkan element yang diberikan
+            logger.info("🔍 Looking for Local File element...")
+            
+            # Selector untuk Local File berdasarkan outerHTML yang diberikan
+            local_file_selector = "div.source-arr-item"
+            
+            try:
+                local_file_element = self.wait.until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, local_file_selector))
+                )
+                logger.info("✅ Found Local File element")
+                
+                # Hover ke Local File untuk memunculkan dropdown menu
+                ActionChains(self.driver).move_to_element(local_file_element).perform()
+                logger.info("🖱️ Hovered over Local File")
+                time.sleep(2)
+                
+                # Sekarang cari dan klik "Select folders" dalam dropdown
+                select_folders_selector = "div.local-item"  # Akan ada 2 element: Select File dan Select folders
+                
+                select_folder_elements = self.driver.find_elements(By.CSS_SELECTOR, select_folders_selector)
+                logger.info(f"📁 Found {len(select_folder_elements)} local-item elements")
+                
+                select_folders_element = None
+                for element in select_folder_elements:
+                    if "Select folders" in element.text:
+                        select_folders_element = element
+                        break
+                
+                if select_folders_element and select_folders_element.is_displayed():
+                    logger.info("✅ Found Select folders option")
+                    select_folders_element.click()
+                    time.sleep(3)
+                    
+                    # Sekarang file picker seharusnya terbuka
+                    # Kita perlu menangani file picker system
+                    return self.handle_file_picker(folder_path)
+                else:
+                    logger.error("❌ Select folders element not found or not visible")
+                    return []
+                    
+            except Exception as e:
+                logger.error(f"❌ Error interacting with Local File: {e}")
+                self.driver.save_screenshot("local_file_error.png")
+                return []
+                
+        except Exception as e:
+            logger.error(f"💥 Selenium upload error: {e}")
+            try:
+                self.driver.save_screenshot(f"error_{int(time.time())}.png")
+            except:
+                pass
+            return []
+        finally:
+            if self.driver:
+                self.driver.quit()
+                logger.info("✅ Chrome driver closed")
+
+    def handle_file_picker(self, folder_path: Path) -> List[str]:
+        """Handle system file picker dialog"""
+        try:
+            logger.info("📁 Handling file picker dialog...")
+            
+            # Untuk file picker system, kita perlu menggunakan alternative approach
+            # Karena Selenium tidak bisa langsung berinteraksi dengan system dialog
+            
+            # Approach: Cari input file hidden dan gunakan send_keys
             file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            logger.info(f"📁 Found {len(file_inputs)} file input elements")
-            
             if file_inputs:
-                # Gunakan input file pertama yang ditemukan
+                logger.info("📤 Found file input element, trying direct file input...")
                 file_input = file_inputs[0]
                 
-                # Kumpulkan semua file paths
+                # Kumpulkan semua file paths dari folder
                 all_files = list(folder_path.rglob('*'))
                 files_to_upload = [str(f.absolute()) for f in all_files if f.is_file()]
                 
@@ -533,149 +754,205 @@ class TeraboxSeleniumUploader:
                     logger.error("❌ No files found to upload")
                     return []
                 
-                # Upload file dalam batch kecil dulu untuk testing
-                test_files = files_to_upload[:5]
+                logger.info(f"📊 Found {len(files_to_upload)} files to upload")
                 
-                # Kirim file paths ke input file
+                # Upload file dalam batch kecil untuk testing
+                test_files = files_to_upload[:10]  # Batasi 10 file dulu untuk testing
                 file_input.send_keys("\n".join(test_files))
-                logger.info(f"📤 Sent {len(test_files)} files to upload input")
+                logger.info(f"✅ Sent {len(test_files)} files to file input")
                 
-                # Tunggu proses upload
-                for i in range(30):  # Tunggu maksimal 30 detik
-                    time.sleep(1)
-                    # Cek jika ada progress bar atau indikator upload selesai
-                    try:
-                        progress_elements = self.driver.find_elements(By.XPATH, "//*[contains(@class, 'progress') or contains(@class, 'complete')]")
-                        if progress_elements:
-                            logger.info("📊 Upload progress detected")
-                    except:
-                        pass
+                # Tunggu upload process
+                time.sleep(15)
                 
-                # Screenshot hasil upload
-                self.driver.save_screenshot("upload_complete.png")
-                logger.info("✅ Upload process completed")
-                
-                # Untuk sekarang return dummy link
-                return [f"https://www.terabox.com/shared/upload_{int(time.time())}"]
-            
+                # Klik Generate Link
+                return self.click_generate_link()
             else:
-                # Jika tidak ada input file, coba cari opsi "Local File" dan hover
-                logger.info("🔍 No file input found, trying local file option...")
+                logger.warning("⚠️ No file input found, file picker might be system dialog")
                 
-                local_file_selectors = [
-                    "//*[contains(text(), 'Local File')]",
-                    "//*[contains(@class, 'source-arr-item')]",
-                    "//*[contains(@class, 'local-file')]"
-                ]
+                # Untuk system dialog, kita beri instruksi manual
+                # Save folder path untuk instruksi manual
+                instruction_file = "upload_instructions.txt"
+                with open(instruction_file, 'w') as f:
+                    f.write(f"Folder to upload: {folder_path}\n")
+                    f.write(f"Total files: {len(list(folder_path.rglob('*')))}\n")
                 
-                local_file_element = None
-                for selector in local_file_selectors:
-                    try:
-                        local_file_element = self.driver.find_element(By.XPATH, selector)
-                        if local_file_element.is_displayed():
-                            logger.info(f"✅ Found local file element: {selector}")
-                            break
-                        else:
-                            local_file_element = None
-                    except:
-                        continue
-                
-                if local_file_element:
-                    # Hover ke local file element
-                    ActionChains(self.driver).move_to_element(local_file_element).perform()
-                    time.sleep(2)
-                    
-                    # Cari opsi "Select Folder" setelah hover
-                    select_folder_selectors = [
-                        "//*[contains(text(), 'Select Folder')]",
-                        "//*[contains(text(), '选择文件夹')]",
-                        "//div[contains(@class, 'local-item')]"
-                    ]
-                    
-                    for selector in select_folder_selectors:
-                        try:
-                            select_folder_btn = self.driver.find_element(By.XPATH, selector)
-                            if select_folder_btn.is_displayed():
-                                logger.info(f"✅ Found select folder option: {selector}")
-                                select_folder_btn.click()
-                                time.sleep(3)
-                                
-                                # Sekarang harusnya ada file picker
-                                # Untuk automation, kita butuh handle file picker
-                                # Ini complex, jadi untuk sekarang kita beri instruksi manual
-                                break
-                        except:
-                            continue
-                
-                # Screenshot state terakhir
-                self.driver.save_screenshot("local_file_interaction.png")
-                logger.warning("⚠️ Manual intervention required for folder selection")
+                logger.info(f"📝 Saved upload instructions to {instruction_file}")
                 return []
                 
         except Exception as e:
-            logger.error(f"💥 Selenium upload error: {e}")
-            # Ambil screenshot untuk debugging error
-            try:
-                self.driver.save_screenshot(f"error_{int(time.time())}.png")
-            except:
-                pass
+            logger.error(f"❌ File picker handling error: {e}")
             return []
-        
-        finally:
-            if self.driver:
-                self.driver.quit()
-                logger.info("✅ Chrome driver closed")
+
+    def click_generate_link(self) -> List[str]:
+        """Click Generate Link button dan extract sharing links"""
+        try:
+            logger.info("🔗 Looking for Generate Link button...")
+            
+            # Selector untuk Generate Link berdasarkan outerHTML yang diberikan
+            generate_selectors = [
+                "div.create-btn",
+                "span.create-btn-text"
+            ]
+            
+            generate_btn = None
+            for selector in generate_selectors:
+                try:
+                    if selector.startswith("div"):
+                        generate_btn = self.wait.until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                        )
+                    else:
+                        generate_btn = self.wait.until(
+                            EC.element_to_be_clickable((By.XPATH, f"//span[contains(text(), 'Generate Link')]"))
+                        )
+                    
+                    if generate_btn and generate_btn.is_displayed():
+                        logger.info(f"✅ Found Generate Link button with selector: {selector}")
+                        generate_btn.click()
+                        logger.info("🖱️ Clicked Generate Link button")
+                        break
+                    else:
+                        generate_btn = None
+                except:
+                    continue
+            
+            if not generate_btn:
+                logger.error("❌ Generate Link button not found")
+                return []
+            
+            # Tunggu proses generating link
+            logger.info("⏳ Waiting for link generation...")
+            time.sleep(15)
+            
+            # Screenshot hasil
+            self.driver.save_screenshot("generate_link_result.png")
+            logger.info("📸 Saved screenshot of generate link result")
+            
+            # Extract links dari page
+            return self.extract_share_links()
+            
+        except Exception as e:
+            logger.error(f"❌ Generate Link error: {e}")
+            return []
+
+    def extract_share_links(self) -> List[str]:
+        """Extract sharing links dari halaman hasil"""
+        try:
+            logger.info("🔍 Extracting share links from page...")
+            
+            # Cari berbagai pattern link Terabox
+            link_patterns = [
+                "//a[contains(@href, 'terabox.com')]",
+                "//a[contains(@href, '1024tera.com')]",
+                "//div[contains(text(), 'http')]",
+                "//span[contains(text(), 'http')]",
+                "//input[contains(@value, 'http')]"
+            ]
+            
+            links = []
+            for pattern in link_patterns:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, pattern)
+                    for element in elements:
+                        href = element.get_attribute('href') or element.get_attribute('value') or element.text
+                        if href and any(x in href for x in ['terabox.com', '1024tera.com']):
+                            # Filter hanya link share yang valid
+                            if any(x in href for x in ['/s/', '/share/', 'download']):
+                                links.append(href)
+                                logger.info(f"🔗 Found share link: {href}")
+                except:
+                    continue
+            
+            # Remove duplicates
+            links = list(set(links))
+            logger.info(f"📊 Extracted {len(links)} unique share links")
+            
+            if links:
+                return links
+            else:
+                # Jika tidak ada link, coba ambil dari page source
+                page_source = self.driver.page_source
+                import re
+                url_patterns = [
+                    r'https?://[^\s<>"{}|\\^`]*terabox[^\s<>"{}|\\^`]*',
+                    r'https?://[^\s<>"{}|\\^`]*1024tera[^\s<>"{}|\\^`]*'
+                ]
+                
+                for pattern in url_patterns:
+                    found_links = re.findall(pattern, page_source)
+                    # Filter hanya link share yang valid
+                    filtered_links = [link for link in found_links if any(x in link for x in ['/s/', '/share/', 'download'])]
+                    links.extend(filtered_links)
+                
+                links = list(set(links))
+                logger.info(f"🔍 Found {len(links)} links from page source")
+                return links
+                
+        except Exception as e:
+            logger.error(f"❌ Link extraction error: {e}")
+            return []
 
     def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
-        """Generate enhanced manual instructions berdasarkan element yang ada"""
+        """Generate enhanced manual instructions berdasarkan element yang tepat"""
         file_count = len(list(folder_path.rglob('*')))
         
         instructions = f"""
 📋 **INSTRUKSI UPLOAD MANUAL TERABOX - Job #{job_number}**
 
-🌐 **Website**: https://www.terabox.com
+🎯 **Langkah-langkah Berdasarkan Element yang Ditemukan**:
 
-🎯 **Langkah-langkah Berdasarkan Element**:
+1. **Buka Website**: https://dm.1024tera.com/webmaster/new/share
 
-1. **Buka Website**: https://www.terabox.com
-2. **Login** (jika belum)
-3. **Temukan Tombol Upload**:
-   - Cari element dengan class mengandung "upload" 
-   - Atau teks "Upload" / "上传"
+2. **Login (jika belum)**:
+   - Klik: `<div class="login-btn">`
+   - Input email: `<input id="email-input">`
+   - Input password: `<input id="pwd-input">`
+   - Klik: `<div class="btn-class-login">`
+
+3. **Temukan Element "Local File"**:
+   - Cari: `<div class="source-arr-item">`
+   - Atau teks: "Local File"
+
+4. **Hover ke "Local File"**:
+   - Arahkan mouse ke element Local File
+   - Tunggu menu dropdown muncul
+
+5. **Klik "Select folders"**:
+   - Pada menu dropdown, cari: `<div class="local-item">Select folders</div>`
+   - Klik opsi tersebut
+
+6. **Pilih Folder di File Picker**:
+   - Navigate ke: `{folder_path}`
+   - Pilih folder (bukan file individual)
+   - Klik "Open" atau "Select Folder"
+
+7. **Klik "Generate Link"**:
+   - Setelah file terupload, cari: `<div class="create-btn">`
+   - Atau teks: "Generate Link"
    - Klik tombol tersebut
 
-4. **Pilih File**:
-   - Setelah klik upload, akan muncul dialog
-   - **Opsi 1**: Jika ada "Local File" → hover → pilih "Select Folder"
-   - **Opsi 2**: Jika langsung muncul file picker → pilih folder: `{folder_path}`
-
-5. **Select Folder**:
-   - Navigate ke: `{folder_path}`
-   - Pilih folder atau file dengan Ctrl+A
-   - Klik "Open"
-
-6. **Tunggu Upload**:
-   - Progress bar akan menunjukkan status
-   - Tunggu sampai semua file selesai
-
-7. **Dapatkan Link**:
-   - Setelah upload, cari opsi "Share" 
-   - Copy link yang dihasilkan
+8. **Copy Share Link**:
+   - Tunggu hingga link generated
+   - Copy link yang muncul
 
 📁 **Detail Folder**:
 - Path: `{folder_path}`
 - Total Files: {file_count} files
 - Job ID: #{job_number}
 
-💡 **Element yang Dicari**:
-- Tombol: class mengandung "upload", "add-local-file"
-- Opsi: "Local File" → "Select Folder"
-- File Picker: input type="file" (multiple)
+💡 **Element Exact yang Digunakan**:
+- Login Button: `div.login-btn`
+- Email Input: `input#email-input`
+- Password Input: `input#pwd-input`
+- Login Submit: `div.btn-class-login`
+- Local File: `div.source-arr-item`
+- Select Folders: `div.local-item` (yang berisi text "Select folders")
+- Generate Link: `div.create-btn`
 
-🔧 **Troubleshooting**:
-- Jika gagal, coba upload dalam batch kecil (10-20 file)
-- Gunakan browser Chrome/Edge terbaru
-- Pastikan login terlebih dahulu
+🔧 **Jika File Picker Tidak Buka**:
+- Pastikan pop-up blocker dimatikan
+- Gunakan browser Chrome/Edge
+- Allow permission untuk file system
 """
         return instructions
 
@@ -693,7 +970,7 @@ class UploadManager:
         logger.info("📤 UploadManager initialized with Selenium uploader")
 
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox menggunakan Selenium automation"""
+        """Upload files to Terabox menggunakan Selenium automation dengan element yang tepat"""
         logger.info(f"🚀 Starting Terabox upload untuk job {job_id}, folder: {folder_path}")
         
         try:
@@ -709,20 +986,30 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🤖 Method: Selenium Automation"
+                f"🎯 Method: Selenium dengan Login Automation"
             )
 
-            # Coba automation dengan Selenium
+            # Cek jika credential Terabox tersedia
+            if not self.terabox_selenium_uploader.terabox_email or not self.terabox_selenium_uploader.terabox_password:
+                await self.send_progress_message(
+                    update, context, job_id,
+                    "❌ Terabox credentials tidak ditemukan!\n"
+                    "📋 Silakan set environment variables:\n"
+                    "- TERABOX_EMAIL\n" 
+                    "- TERABOX_PASSWORD"
+                )
+                return []
+
+            # Coba automation dengan Selenium menggunakan element yang tepat
             await self.send_progress_message(
                 update, context, job_id,
-                "🔄 Mencoba upload otomatis dengan browser automation..."
+                "🔄 Mencoba login dan upload otomatis..."
             )
             
-            # Gunakan lock untuk mencegah multiple concurrent Terabox uploads
             with self.terabox_lock:
                 logger.info("🔒 Acquired Terabox upload lock")
                 
-                # Try Selenium automation
+                # Try Selenium automation dengan element exact
                 links = self.terabox_selenium_uploader.upload_folder_via_selenium(folder_path)
                 
                 if links:
@@ -731,7 +1018,7 @@ class UploadManager:
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
-                        f"🤖 Method: Automated Browser Upload"
+                        f"🎯 Method: Automated dengan Login"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -746,22 +1033,22 @@ class UploadManager:
                     
                     return links
                 else:
-                    # Fallback ke instruksi manual yang ditingkatkan
+                    # Fallback ke instruksi manual yang sangat detail
                     await self.send_progress_message(
                         update, context, job_id,
                         "⚠️ Upload otomatis tidak berhasil\n"
-                        "📋 Beralih ke mode manual dengan instruksi terbaru..."
+                        "📋 Beralih ke mode manual dengan instruksi lengkap..."
                     )
                     
                     instructions = self.terabox_selenium_uploader.get_enhanced_manual_instructions(folder_path, job_number)
                     await self.send_progress_message(update, context, job_id, instructions)
                     
-                    return [f"Manual upload required for {folder_path.name} - Job #{job_number}"]
+                    return [f"Manual upload required - Job #{job_number}"]
                     
         except Exception as e:
             logger.error(f"💥 Terabox upload error untuk {job_id}: {e}")
             
-            # Berikan instruksi manual sebagai fallback
+            # Berikan instruksi manual dengan element exact
             instructions = self.terabox_selenium_uploader.get_enhanced_manual_instructions(folder_path, job_number)
             await self.send_progress_message(update, context, job_id, instructions)
             
@@ -1166,7 +1453,7 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream (Selenium Automation)
+📤 Upload ke Terabox/Doodstream (Selenium Automation dengan Login)
 ⚙️ Customizable settings
 
 Commands:
@@ -1399,8 +1686,8 @@ Counter Info:
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
 Upload Method:
-🤖 Selenium Automation: Browser otomatis
-🌐 Fallback: Manual instructions
+🤖 Selenium Automation: Browser otomatis dengan login
+🌐 URL: https://dm.1024tera.com/webmaster/new/share
         """
         
         await update.message.reply_text(status_text)
@@ -1413,6 +1700,10 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show debug information"""
     try:
         debug_info = mega_manager.debug_mega_session()
+        
+        # Cek Terabox credentials
+        terabox_email = os.getenv('TERABOX_EMAIL')
+        terabox_password = os.getenv('TERABOX_PASSWORD')
         
         debug_text = f"""
 🐛 Debug Information
@@ -1429,7 +1720,10 @@ Bot Status:
 
 Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
-🤖 Upload Method: Selenium Automation
+🤖 Upload Method: Selenium dengan Login
+📧 Terabox Email: {'✅ Set' if terabox_email else '❌ Not Set'}
+🔑 Terabox Password: {'✅ Set' if terabox_password else '❌ Not Set'}
+🌐 Target URL: https://dm.1024tera.com/webmaster/new/share
         """
         
         await update.message.reply_text(debug_text)
@@ -1610,7 +1904,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot with Selenium...")
+    logger.info("🚀 Starting Mega Downloader Bot with Selenium Login...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -1628,6 +1922,14 @@ def main():
         logger.error("❌ No Mega.nz accounts configured!")
     else:
         logger.info(f"✅ {len(mega_manager.accounts)} Mega.nz accounts available")
+    
+    # Check Terabox credentials
+    terabox_email = os.getenv('TERABOX_EMAIL')
+    terabox_password = os.getenv('TERABOX_PASSWORD')
+    if not terabox_email or not terabox_password:
+        logger.warning("⚠️ Terabox credentials not found! Please set TERABOX_EMAIL and TERABOX_PASSWORD environment variables")
+    else:
+        logger.info("✅ Terabox credentials found")
     
     # Initialize bot
     token = os.getenv('BOT_TOKEN')
@@ -1653,7 +1955,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully with Selenium automation!")
+    logger.info("✅ Bot started successfully with Selenium login automation!")
     application.run_polling()
 
 if __name__ == '__main__':
