@@ -10,11 +10,12 @@ import threading
 import time
 from datetime import datetime
 from queue import Queue
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
 from enum import Enum
+import psutil
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     ContextTypes, MessageHandler, filters
@@ -31,7 +32,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.FileHandler('bot.log'),
+        logging.FileHandler('bot.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -43,6 +44,7 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m
 DOWNLOAD_BASE = Path('downloads')
 TERABOX_CLI_DIR = Path('TeraboxUploaderCLI')
 MAX_CONCURRENT_DOWNLOADS = 2
+MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024 * 1024  # 50GB
 
 # Global state
 download_queue = Queue()
@@ -67,16 +69,20 @@ class UserSettingsManager:
     
     def load_settings(self) -> Dict:
         try:
-            with open(self.settings_file, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            logger.info("User settings file not found, creating new one")
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            else:
+                logger.info("User settings file not found, creating new one")
+                return {}
+        except Exception as e:
+            logger.error(f"Failed to load user settings: {e}")
             return {}
     
     def save_settings(self):
         try:
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.settings, f, indent=4)
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, indent=4, ensure_ascii=False)
             logger.info("User settings saved successfully")
         except Exception as e:
             logger.error(f"Failed to save user settings: {e}")
@@ -89,7 +95,8 @@ class UserSettingsManager:
                 'prefix': 'file_',
                 'platform': 'terabox',
                 'auto_upload': True,
-                'auto_cleanup': True
+                'auto_cleanup': True,
+                'max_retries': 3
             }
             self.save_settings()
         return self.settings[user_str]
@@ -101,6 +108,30 @@ class UserSettingsManager:
         self.settings[user_str].update(new_settings)
         logger.info(f"Updated settings for user {user_id}: {new_settings}")
         self.save_settings()
+
+class SystemMonitor:
+    @staticmethod
+    def get_system_status() -> Dict[str, Any]:
+        """Get system resource status"""
+        try:
+            disk = psutil.disk_usage(str(DOWNLOAD_BASE))
+            memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent(interval=1)
+            
+            return {
+                'disk_free_gb': disk.free / (1024**3),
+                'disk_total_gb': disk.total / (1024**3),
+                'disk_used_percent': disk.percent,
+                'memory_free_gb': memory.available / (1024**3),
+                'memory_used_percent': memory.percent,
+                'cpu_used_percent': cpu_percent,
+                'active_downloads': len(active_downloads),
+                'queue_size': download_queue.qsize(),
+                'active_processes': threading.active_count()
+            }
+        except Exception as e:
+            logger.error(f"Error getting system status: {e}")
+            return {}
 
 class MegaManager:
     def __init__(self):
@@ -121,7 +152,7 @@ class MegaManager:
         
         for path in possible_paths:
             try:
-                result = subprocess.run(['which', path], capture_output=True, text=True)
+                result = subprocess.run(['which', path], capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     logger.info(f"Found mega-get at: {path}")
                     return path
@@ -138,13 +169,12 @@ class MegaManager:
         
         # Try to load from mega_accounts.json first
         try:
-            with open('mega_accounts.json', 'r') as f:
-                file_accounts = json.load(f)
-                if isinstance(file_accounts, list):
-                    accounts.extend(file_accounts)
-                    logger.info(f"Loaded {len(file_accounts)} accounts from mega_accounts.json")
-        except FileNotFoundError:
-            logger.info("mega_accounts.json not found")
+            if os.path.exists('mega_accounts.json'):
+                with open('mega_accounts.json', 'r', encoding='utf-8') as f:
+                    file_accounts = json.load(f)
+                    if isinstance(file_accounts, list):
+                        accounts.extend(file_accounts)
+                        logger.info(f"Loaded {len(file_accounts)} accounts from mega_accounts.json")
         except Exception as e:
             logger.error(f"Error loading mega_accounts.json: {e}")
         
@@ -173,17 +203,10 @@ class MegaManager:
     def check_mega_get(self) -> bool:
         """Check if mega-get command is available and working"""
         try:
-            # Instead of --version, use a simple help command or just check if executable exists
             cmd = [self.mega_get_path, '--help']
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            
-            # Even if return code is not 0, if we can execute the command, it's available
             logger.info(f"mega-get executable check passed")
             return True
-            
-        except subprocess.TimeoutExpired:
-            logger.error("mega-get check timeout")
-            return False
         except Exception as e:
             logger.error(f"mega-get check error: {e}")
             return False
@@ -202,6 +225,18 @@ class MegaManager:
         else:
             logger.warning("Cannot rotate accounts: only one account available")
     
+    def check_disk_space(self, required_gb: float = 5.0) -> Tuple[bool, float]:
+        """Check if there's enough disk space"""
+        try:
+            disk = psutil.disk_usage(str(DOWNLOAD_BASE))
+            free_gb = disk.free / (1024**3)
+            has_space = free_gb >= required_gb
+            logger.info(f"Disk space check: {free_gb:.2f}GB free, required: {required_gb}GB")
+            return has_space, free_gb
+        except Exception as e:
+            logger.error(f"Error checking disk space: {e}")
+            return False, 0.0
+    
     def debug_mega_session(self) -> Dict:
         """Debug function to check mega session status"""
         debug_info = {}
@@ -213,8 +248,9 @@ class MegaManager:
             debug_info['mega_get_executable'] = os.access(self.mega_get_path, os.X_OK)
             
             # Check disk space
-            df_result = subprocess.run(['df', '-h', str(DOWNLOAD_BASE)], capture_output=True, text=True)
-            debug_info['disk_space'] = df_result.stdout
+            has_space, free_gb = self.check_disk_space()
+            debug_info['disk_free_gb'] = free_gb
+            debug_info['has_sufficient_space'] = has_space
             
             # Check if downloads directory exists and is writable
             download_test = DOWNLOAD_BASE / 'test_write'
@@ -233,6 +269,9 @@ class MegaManager:
             debug_info['current_account'] = self.get_current_account()['email'] if self.get_current_account() else None
             debug_info['total_accounts'] = len(self.accounts)
             
+            # System status
+            debug_info.update(SystemMonitor.get_system_status())
+            
             return debug_info
             
         except Exception as e:
@@ -249,17 +288,24 @@ class MegaManager:
         max_retries = 3
         retry_count = 0
         
+        # Check disk space before starting
+        has_space, free_gb = self.check_disk_space(required_gb=5.0)
+        if not has_space:
+            error_msg = f"Insufficient disk space: {free_gb:.2f}GB free, need at least 5GB"
+            logger.error(f"❌ {error_msg}")
+            return False, error_msg
+        
         while retry_count < max_retries:
             try:
                 # Debug session first
                 debug_info = self.debug_mega_session()
                 logger.info(f"🔧 Debug info for {job_id}: {json.dumps(debug_info, indent=2)}")
                 
-                # HANYA pastikan base download directory ada, folder spesifik akan dibuat oleh mega-get
+                # Ensure base download directory exists
                 DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
                 logger.info(f"📁 Base download directory ready: {DOWNLOAD_BASE}")
                 
-                # Test write permission di base directory
+                # Test write permission in base directory
                 test_file = DOWNLOAD_BASE / 'test_write.txt'
                 try:
                     test_file.write_text('test')
@@ -270,17 +316,17 @@ class MegaManager:
                     logger.error(f"❌ {error_msg}")
                     return False, error_msg
                 
-                # Change to base download directory for mega-get (bukan folder spesifik)
+                # Change to base download directory for mega-get
                 original_cwd = os.getcwd()
                 os.chdir(DOWNLOAD_BASE)
                 logger.info(f"📂 Changed working directory to base: {DOWNLOAD_BASE}")
                 
                 try:
-                    # Now download using mega-get - biarkan mega-get yang membuat folder
+                    # Download using mega-get
                     download_cmd = [self.mega_get_path, folder_url]
                     logger.info(f"⚡ Executing download command: {' '.join(download_cmd)}")
                     
-                    # Execute download with longer timeout
+                    # Execute download with timeout
                     start_time = time.time()
                     logger.info(f"⏰ Download started at: {datetime.now()}")
                     
@@ -292,9 +338,10 @@ class MegaManager:
                     
                     # Log command results
                     logger.info(f"📊 Download command return code: {result.returncode}")
-                    logger.info(f"📤 Download stdout: {result.stdout}")
+                    if result.stdout:
+                        logger.info(f"📤 Download stdout: {result.stdout[-1000:]}")  # Last 1000 chars
                     if result.stderr:
-                        logger.warning(f"📥 Download stderr: {result.stderr}")
+                        logger.warning(f"📥 Download stderr: {result.stderr[-1000:]}")
                     
                     # Return to original directory
                     os.chdir(original_cwd)
@@ -306,7 +353,6 @@ class MegaManager:
                         time.sleep(5)
                         
                         # Check if files were actually downloaded
-                        # mega-get biasanya membuat folder dengan nama berdasarkan link
                         all_files = list(DOWNLOAD_BASE.rglob('*'))
                         files = [f for f in all_files if f.is_file()]
                         directories = [f for f in all_files if f.is_dir()]
@@ -314,14 +360,14 @@ class MegaManager:
                         logger.info(f"📊 File check results: {len(files)} files, {len(directories)} directories")
                         
                         # Log all files and directories for debugging
-                        for f in files:
+                        for f in files[:10]:  # Log first 10 files only
                             try:
                                 file_size = f.stat().st_size
                                 logger.info(f"📄 File: {f.relative_to(DOWNLOAD_BASE)} ({file_size} bytes)")
                             except Exception as e:
                                 logger.warning(f"⚠️ Could not stat file {f}: {e}")
                         
-                        for d in directories:
+                        for d in directories[:5]:  # Log first 5 directories
                             logger.info(f"📁 Directory: {d.relative_to(DOWNLOAD_BASE)}")
                         
                         total_files = len(files)
@@ -331,7 +377,7 @@ class MegaManager:
                             logger.error(f"❌ {error_msg}")
                             # Check output for clues
                             if "error" in result.stdout.lower() or "error" in result.stderr.lower():
-                                error_msg = f"Download completed with errors: {result.stdout} {result.stderr}"
+                                error_msg = f"Download completed with errors: {result.stdout[-500]} {result.stderr[-500]}"
                             elif "no such file" in result.stdout.lower() or "no such file" in result.stderr.lower():
                                 error_msg = "Folder not found or inaccessible"
                             return False, error_msg
@@ -388,7 +434,7 @@ class FileManager:
             
             # Remove duplicates and sort
             media_files = list(set(media_files))
-            media_files.sort()
+            media_files.sort(key=lambda x: x.name.lower())
             
             total_files = len(media_files)
             renamed_count = 0
@@ -406,6 +452,13 @@ class FileManager:
                 # Rename file
                 try:
                     if file_path != new_path:
+                        # Check if target file already exists
+                        if new_path.exists():
+                            # Add timestamp to avoid conflicts
+                            timestamp = int(time.time())
+                            new_name = f"{prefix} {number_str}_{timestamp}{file_path.suffix}"
+                            new_path = file_path.parent / new_name
+                        
                         file_path.rename(new_path)
                         renamed_count += 1
                         logger.info(f"✅ Renamed: {file_path.name} -> {new_name}")
@@ -457,6 +510,8 @@ class UploadManager:
             with self._counter_lock:
                 job_number = self._job_counter
                 self._job_counter += 1
+                if self._job_counter > 1000:  # Reset setelah 1000 job
+                    self._job_counter = 1
 
             # Mapping job number ke folder number (1-10) dalam /bot/
             folder_number = (job_number - 1) % 10 + 1
@@ -483,15 +538,20 @@ class UploadManager:
                 
                 try:
                     # Check jika Python tersedia
-                    check_cmd = ['python', '--version']
-                    check_result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=30)
-                    logger.info(f"📊 Python check: {check_result.stdout.strip()}")
+                    check_cmd = ['python3', '--version']  # Try python3 first
+                    try:
+                        subprocess.run(check_cmd, capture_output=True, timeout=10)
+                        python_cmd = 'python3'
+                    except:
+                        python_cmd = 'python'
+                    
+                    logger.info(f"🐍 Using Python command: {python_cmd}")
 
                     # Install dependencies jika diperlukan
                     requirements_file = TERABOX_CLI_DIR / 'requirements.txt'
                     if requirements_file.exists():
                         logger.info("📦 Requirements.txt ditemukan, checking dependencies...")
-                        install_cmd = ['pip', 'install', '-r', 'requirements.txt']
+                        install_cmd = [python_cmd, '-m', 'pip', 'install', '-r', 'requirements.txt']
                         install_result = subprocess.run(install_cmd, capture_output=True, text=True, timeout=300)
                         if install_result.returncode == 0:
                             logger.info("✅ Dependencies installed successfully")
@@ -500,9 +560,9 @@ class UploadManager:
 
                     # Run uploader dengan parameter destination folder yang baru
                     cmd = [
-                        'python', 'main.py', 
+                        python_cmd, 'main.py', 
                         '--source', str(folder_path),
-                        '--destination', destination_folder  # Parameter untuk folder tujuan spesifik
+                        '--destination', destination_folder
                     ]
                     
                     logger.info(f"⚡ Executing TeraboxUploaderCLI: {' '.join(cmd)}")
@@ -531,9 +591,10 @@ class UploadManager:
                             stdout_line = process.stdout.readline()
                             if stdout_line:
                                 stdout_lines.append(stdout_line.strip())
-                                logger.info(f"📤 TeraboxUploaderCLI stdout: {stdout_line.strip()}")
+                                if "upload" in stdout_line.lower() or "progress" in stdout_line.lower():
+                                    logger.info(f"📤 TeraboxUploaderCLI: {stdout_line.strip()}")
                             
-                            # Read stderr
+                            # Read stderr  
                             stderr_line = process.stderr.readline()
                             if stderr_line:
                                 stderr_lines.append(stderr_line.strip())
@@ -574,7 +635,7 @@ class UploadManager:
                         await self.send_progress_message(update, context, job_id, success_msg)
                         return [f"Upload completed - Terabox folder: {destination_folder}"]
                     else:
-                        error_output = "\n".join(stderr_lines) if stderr_lines else "\n".join(stdout_lines)
+                        error_output = "\n".join(stderr_lines[-500:]) if stderr_lines else "\n".join(stdout_lines[-500:])
                         error_msg = f"TeraboxUploaderCLI gagal dengan return code {returncode}: {error_output}"
                         logger.error(f"❌ {error_msg}")
                         
@@ -607,15 +668,6 @@ class UploadManager:
             logger.error(f"💥 Terabox upload setup error untuk {job_id}: {e}")
             await self.send_progress_message(update, context, job_id, f"❌ Upload setup error: {str(e)}")
             return []
-
-    # Method untuk monitoring job counter
-    def get_job_counter_status(self) -> Dict:
-        """Get current status job counter untuk debugging"""
-        return {
-            'current_job_counter': self._job_counter,
-            'next_folder': f"/bot/{(self._job_counter - 1) % 10 + 1}",
-            'counter_locked': self._counter_lock.locked()
-        }
 
     async def upload_to_doodstream(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
         """Upload video files ke Doodstream"""
@@ -650,6 +702,11 @@ class UploadManager:
                     
                 try:
                     logger.info(f"📤 Uploading file {i}/{total_files}: {file_path.name}")
+                    await self.send_progress_message(
+                        update, context, job_id,
+                        f"📤 Upload progress: {i}/{total_files}\n📹 Processing: {file_path.name}"
+                    )
+                    
                     link = await self.upload_single_file_to_doodstream(file_path)
                     if link:
                         links.append(link)
@@ -669,6 +726,13 @@ class UploadManager:
                     logger.error(f"💥 Error uploading {file_path}: {e}")
             
             logger.info(f"📊 Doodstream upload completed: {uploaded_count}/{total_files} files uploaded")
+            
+            if uploaded_count > 0:
+                await self.send_progress_message(
+                    update, context, job_id,
+                    f"✅ Doodstream upload selesai!\n🔗 {uploaded_count} links generated"
+                )
+            
             return links
         except Exception as e:
             logger.error(f"💥 Doodstream upload error untuk {job_id}: {e}")
@@ -681,11 +745,17 @@ class UploadManager:
             logger.info(f"📤 Uploading single file ke Doodstream: {file_path}")
             url = "https://doodstream.com/api/upload"
             
+            # Check file size
+            file_size = file_path.stat().st_size
+            if file_size > 500 * 1024 * 1024:  # 500MB limit
+                logger.error(f"❌ File too large for Doodstream: {file_size} bytes")
+                return ""
+            
             with open(file_path, 'rb') as f:
                 files = {'file': f}
                 data = {'key': self.doodstream_key}
                 
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3600)) as session:
                     async with session.post(url, data=data, files=files) as response:
                         result = await response.json()
                         logger.info(f"📊 Doodstream API response: {result}")
@@ -742,6 +812,15 @@ class UploadManager:
         if not is_active:
             logger.info(f"⏹️  Job {job_id} is no longer active")
         return is_active
+
+    # Method untuk monitoring job counter
+    def get_job_counter_status(self) -> Dict:
+        """Get current status job counter untuk debugging"""
+        return {
+            'current_job_counter': self._job_counter,
+            'next_folder': f"/bot/{(self._job_counter - 1) % 10 + 1}",
+            'counter_locked': self._counter_lock.locked()
+        }
 
 class DownloadProcessor:
     def __init__(self, mega_manager: MegaManager, file_manager: FileManager, upload_manager: UploadManager, settings_manager: UserSettingsManager):
@@ -815,7 +894,6 @@ class DownloadProcessor:
             logger.info(f"🔽 Starting Mega.nz download untuk job {job_id}")
             
             # mega-get akan otomatis membuat folder berdasarkan nama folder di Mega.nz
-            # Kita tidak perlu membuat folder spesifik
             success, message = self.mega_manager.download_mega_folder(mega_url, DOWNLOAD_BASE, job_id)
             
             if not success:
@@ -828,7 +906,6 @@ class DownloadProcessor:
                 return
             
             # Check jika files actually exist - cari folder yang dibuat oleh mega-get
-            # mega-get biasanya membuat folder dengan nama yang sama seperti di Mega.nz
             all_files = list(DOWNLOAD_BASE.rglob('*'))
             files = [f for f in all_files if f.is_file()]
             directories = [f for f in all_files if f.is_dir()]
@@ -854,7 +931,6 @@ class DownloadProcessor:
             )
             
             # Cari folder yang berisi file-file yang didownload
-            # Biasanya folder terbaru yang berisi file
             download_folders = [d for d in DOWNLOAD_BASE.iterdir() if d.is_dir()]
             target_folder = None
             
@@ -910,7 +986,7 @@ class DownloadProcessor:
                     links = await self.upload_manager.upload_to_doodstream(target_folder, update, context, job_id)
                 
                 # Jangan kirim duplicate success message untuk Terabox
-                if platform != 'terabox':
+                if platform != 'terabox' and links:
                     logger.info(f"✅ Upload completed untuk job {job_id}: {len(links)} links generated")
                     await self.upload_manager.send_progress_message(
                         update, context, job_id,
@@ -938,9 +1014,6 @@ class DownloadProcessor:
                             )
                         else:
                             logger.info(f"📁 Folder sudah kosong untuk job {job_id}, skipping cleanup")
-                            await self.upload_manager.send_progress_message(
-                                update, context, job_id, "📁 Folder sudah kosong, skip cleanup"
-                            )
                     else:
                         logger.warning(f"⚠️  Folder tidak ditemukan selama cleanup untuk job {job_id}: {target_folder}")
                 except Exception as e:
@@ -989,18 +1062,490 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 # Start download processor
 download_processor.start_processing()
 
-# Telegram Bot Handlers (sama seperti sebelumnya)
-# ... [Semua handler Telegram tetap sama]
+# Telegram Bot Handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message when the command /start is issued."""
+    user = update.effective_user
+    welcome_text = f"""
+🤖 **Mega Downloader Bot**
 
-# [Semua fungsi handler Telegram tetap sama seperti kode sebelumnya]
-# ... start, help, download, status, counter_status, debug, set_prefix, set_platform, 
-# ... auto_upload_toggle, auto_cleanup_toggle, my_settings, cleanup, upload_command
+Halo {user.mention_html()}!
+
+Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berbagai platform.
+
+**Fitur:**
+📥 Download folder dari Mega.nz
+🔄 Auto-rename file media  
+📤 Upload ke Terabox/Doodstream
+⚙️ Customizable settings
+
+**Commands:**
+/download <url> - Download folder Mega.nz
+/upload <path> - Upload folder manual
+/status - Lihat status download
+/mysettings - Lihat pengaturan
+/setprefix <prefix> - Set file prefix
+/setplatform <terabox|doodstream> - Set platform upload
+/autoupload <on|off> - Toggle auto upload
+/autocleanup <on|off> - Toggle auto cleanup
+/debug - Info debug system
+/cleanup - Bersihkan file temporary
+
+Contoh: `/download https://mega.nz/folder/abc123`
+    """
+    await update.message.reply_html(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message"""
+    help_text = """
+**📖 Bantuan Mega Downloader Bot**
+
+**Cara penggunaan:**
+1. Kirim command `/download` diikuti URL folder Mega.nz
+2. Bot akan otomatis mendownload, rename, dan upload file
+3. Pantau progress melalui status message
+
+**Pengaturan yang tersedia:**
+- `prefix`: Nama prefix untuk file setelah di-rename
+- `platform`: Platform upload (terabox/doodstream)  
+- `auto_upload`: Auto upload setelah download
+- `auto_cleanup`: Hapus file lokal setelah upload
+
+**Contoh commands:**
+`/download https://mega.nz/folder/abc123`
+`/setprefix my_files`
+`/setplatform terabox`
+`/autoupload on`
+`/status`
+    """
+    await update.message.reply_text(help_text)
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /download command"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap sertakan URL Mega.nz\n"
+                "Contoh: /download https://mega.nz/folder/abc123"
+            )
+            return
+        
+        mega_url = context.args[0]
+        
+        # Validate Mega.nz URL
+        if not re.match(r'https://mega\.nz/folder/[a-zA-Z0-9_-]+', mega_url):
+            await update.message.reply_text(
+                "❌ URL Mega.nz tidak valid!\n"
+                "Format yang benar: https://mega.nz/folder/ID_FOLDER"
+            )
+            return
+        
+        # Generate job ID
+        job_id = f"job_{int(time.time())}_{update.effective_user.id}"
+        
+        # Get folder name from URL or use default
+        folder_name = f"Folder_{int(time.time())}"
+        if '#' in mega_url:
+            folder_name = mega_url.split('#')[-1]
+        
+        # Add to download queue
+        job_data = {
+            'job_id': job_id,
+            'folder_name': folder_name,
+            'mega_url': mega_url,
+            'user_id': update.effective_user.id,
+            'chat_id': update.effective_chat.id,
+            'update': update,
+            'context': context,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        # Initialize active download
+        active_downloads[job_id] = {
+            'job_id': job_id,
+            'folder_name': folder_name,
+            'mega_url': mega_url,
+            'user_id': update.effective_user.id,
+            'chat_id': update.effective_chat.id,
+            'status': DownloadStatus.PENDING,
+            'progress': 'Menunggu dalam antrian...',
+            'created_at': datetime.now().isoformat()
+        }
+        
+        download_queue.put(job_data)
+        
+        # Send confirmation
+        user_settings = settings_manager.get_user_settings(update.effective_user.id)
+        platform = user_settings.get('platform', 'terabox')
+        auto_upload = user_settings.get('auto_upload', True)
+        
+        response_text = (
+            f"✅ **Download Job Ditambahkan**\n\n"
+            f"📁 **Folder:** {folder_name}\n"
+            f"🔗 **URL:** {mega_url}\n"
+            f"🆔 **Job ID:** {job_id}\n"
+            f"📊 **Antrian:** {download_queue.qsize() + 1}\n\n"
+            f"⚙️ **Pengaturan:**\n"
+            f"• Platform: {platform}\n"
+            f"• Auto Upload: {'✅' if auto_upload else '❌'}\n\n"
+            f"Gunakan /status untuk memantau progress."
+        )
+        
+        await update.message.reply_text(response_text)
+        logger.info(f"📥 Added download job {job_id} untuk user {update.effective_user.id}")
+        
+    except Exception as e:
+        logger.error(f"💥 Error in download_command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle manual upload command"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap sertakan path folder\n"
+                "Contoh: /upload /path/to/folder"
+            )
+            return
+        
+        folder_path = Path(context.args[0])
+        if not folder_path.exists() or not folder_path.is_dir():
+            await update.message.reply_text("❌ Folder tidak ditemukan!")
+            return
+        
+        user_id = update.effective_user.id
+        user_settings = settings_manager.get_user_settings(user_id)
+        platform = user_settings.get('platform', 'terabox')
+        
+        job_id = f"upload_{int(time.time())}_{user_id}"
+        
+        # Initialize active download
+        active_downloads[job_id] = {
+            'job_id': job_id,
+            'folder_name': folder_path.name,
+            'user_id': user_id,
+            'chat_id': update.effective_chat.id,
+            'status': DownloadStatus.UPLOADING,
+            'progress': 'Memulai upload manual...',
+            'created_at': datetime.now().isoformat()
+        }
+        
+        await update.message.reply_text(f"📤 Memulai upload manual ke {platform}...")
+        
+        if platform == 'terabox':
+            links = await upload_manager.upload_to_terabox(folder_path, update, context, job_id)
+        else:
+            links = await upload_manager.upload_to_doodstream(folder_path, update, context, job_id)
+        
+        # Mark as completed
+        active_downloads[job_id]['status'] = DownloadStatus.COMPLETED
+        active_downloads[job_id]['progress'] = "Upload manual selesai"
+        
+        if links:
+            await update.message.reply_text(f"✅ Upload selesai! {len(links)} links generated")
+        else:
+            await update.message.reply_text("⚠️ Upload completed tetapi tidak ada links yang dihasilkan")
+            
+    except Exception as e:
+        logger.error(f"💥 Error in upload_command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current download status"""
+    try:
+        user_id = update.effective_user.id
+        
+        # Filter jobs by user
+        user_active_jobs = {k: v for k, v in active_downloads.items() if v['user_id'] == user_id}
+        user_completed_jobs = {k: v for k, v in completed_downloads.items() if v['user_id'] == user_id}
+        
+        system_status = SystemMonitor.get_system_status()
+        
+        status_text = f"""
+**📊 System Status**
+💾 Disk: {system_status.get('disk_free_gb', 0):.1f}GB free
+🔄 Active Downloads: {system_status.get('active_downloads', 0)}
+📋 Queue Size: {system_status.get('queue_size', 0)}
+
+**👤 Your Jobs**
+⏳ Active: {len(user_active_jobs)}
+✅ Completed: {len(user_completed_jobs)}
+
+**Active Jobs:**
+"""
+        
+        if user_active_jobs:
+            for job_id, job in list(user_active_jobs.items())[:5]:  # Show last 5
+                status_text += f"\n📁 {job['folder_name']}\n"
+                status_text += f"🆔 {job_id}\n"
+                status_text += f"📊 {job['status'].value}\n"
+                status_text += f"⏰ {job.get('progress', 'Processing...')}\n"
+        else:
+            status_text += "\nTidak ada active jobs"
+        
+        status_text += f"\n**Completed Jobs (last 3):**"
+        
+        if user_completed_jobs:
+            for job_id, job in list(user_completed_jobs.items())[-3:]:  # Show last 3
+                status_text += f"\n📁 {job['folder_name']}\n"
+                status_text += f"🆔 {job_id}\n"
+                status_text += f"✅ {job['status'].value}\n"
+                if job.get('completed_at'):
+                    status_text += f"⏰ {job['completed_at'][:19]}\n"
+        else:
+            status_text += "\nTidak ada completed jobs"
+        
+        await update.message.reply_text(status_text)
+        
+    except Exception as e:
+        logger.error(f"💥 Error in status_command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show Terabox job counter status"""
+    try:
+        counter_status = upload_manager.get_job_counter_status()
+        system_status = SystemMonitor.get_system_status()
+        
+        status_text = f"""
+**🔢 Terabox Job Counter Status**
+
+**Counter Info:**
+🔄 Current Job Counter: #{counter_status['current_job_counter']}
+📂 Next Folder: {counter_status['next_folder']}
+🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
+
+**System Resources:**
+💾 Disk Free: {system_status.get('disk_free_gb', 0):.1f}GB
+🧠 Memory Used: {system_status.get('memory_used_percent', 0):.1f}%
+⚡ CPU Used: {system_status.get('cpu_used_percent', 0):.1f}%
+
+**Active Processes:**
+📥 Download Processes: {system_status.get('active_processes', 0)}
+🔄 Active Downloads: {system_status.get('active_downloads', 0)}
+📋 Queue Size: {system_status.get('queue_size', 0)}
+        """
+        
+        await update.message.reply_text(status_text)
+        
+    except Exception as e:
+        logger.error(f"💥 Error in counter_status_command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show debug information"""
+    try:
+        debug_info = mega_manager.debug_mega_session()
+        system_status = SystemMonitor.get_system_status()
+        
+        debug_text = f"""
+**🐛 Debug Information**
+
+**Mega.nz Status:**
+✅ mega-get Available: {debug_info.get('mega_get_exists', False)}
+📂 Downloads Writable: {debug_info.get('downloads_writable', False)}
+🔑 Accounts: {debug_info.get('total_accounts', 0)}
+📧 Current Account: {debug_info.get('current_account', 'None')}
+
+**System Resources:**
+💾 Disk Free: {system_status.get('disk_free_gb', 0):.1f}GB / {system_status.get('disk_total_gb', 0):.1f}GB
+💾 Disk Used: {system_status.get('disk_used_percent', 0):.1f}%
+🧠 Memory Free: {system_status.get('memory_free_gb', 0):.1f}GB
+🧠 Memory Used: {system_status.get('memory_used_percent', 0):.1f}%
+⚡ CPU Used: {system_status.get('cpu_used_percent', 0):.1f}%
+
+**Bot Status:**
+🔄 Active Downloads: {system_status.get('active_downloads', 0)}
+📋 Queue Size: {system_status.get('queue_size', 0)}
+🔢 Active Processes: {system_status.get('active_processes', 0)}
+
+**Terabox Status:**
+🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
+📂 Next Folder: {upload_manager.get_job_counter_status().get('next_folder', 'Unknown')}
+        """
+        
+        await update.message.reply_text(debug_text)
+        
+    except Exception as e:
+        logger.error(f"💥 Error in debug_command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set file prefix for user"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap sertakan prefix\n"
+                "Contoh: /setprefix my_files"
+            )
+            return
+        
+        prefix = context.args[0]
+        user_id = update.effective_user.id
+        
+        settings_manager.update_user_settings(user_id, {'prefix': prefix})
+        
+        await update.message.reply_text(f"✅ Prefix berhasil diubah menjadi: `{prefix}`", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"💥 Error in set_prefix: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set upload platform for user"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap sertakan platform\n"
+                "Contoh: /setplatform terabox"
+            )
+            return
+        
+        platform = context.args[0].lower()
+        if platform not in ['terabox', 'doodstream']:
+            await update.message.reply_text(
+                "❌ Platform tidak valid!\n"
+                "Pilihan: terabox, doodstream"
+            )
+            return
+        
+        user_id = update.effective_user.id
+        settings_manager.update_user_settings(user_id, {'platform': platform})
+        
+        await update.message.reply_text(f"✅ Platform upload berhasil diubah ke: `{platform}`", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"💥 Error in set_platform: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle auto upload setting"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap sertakan on/off\n"
+                "Contoh: /autoupload on"
+            )
+            return
+        
+        toggle = context.args[0].lower()
+        if toggle not in ['on', 'off']:
+            await update.message.reply_text("❌ Pilihan: on atau off")
+            return
+        
+        user_id = update.effective_user.id
+        auto_upload = toggle == 'on'
+        settings_manager.update_user_settings(user_id, {'auto_upload': auto_upload})
+        
+        status = "AKTIF" if auto_upload else "NON-AKTIF"
+        await update.message.reply_text(f"✅ Auto upload diubah menjadi: `{status}`", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"💥 Error in auto_upload_toggle: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle auto cleanup setting"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap sertakan on/off\n"
+                "Contoh: /autocleanup on"
+            )
+            return
+        
+        toggle = context.args[0].lower()
+        if toggle not in ['on', 'off']:
+            await update.message.reply_text("❌ Pilihan: on atau off")
+            return
+        
+        user_id = update.effective_user.id
+        auto_cleanup = toggle == 'on'
+        settings_manager.update_user_settings(user_id, {'auto_cleanup': auto_cleanup})
+        
+        status = "AKTIF" if auto_cleanup else "NON-AKTIF"
+        await update.message.reply_text(f"✅ Auto cleanup diubah menjadi: `{status}`", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"💥 Error in auto_cleanup_toggle: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user settings"""
+    try:
+        user_id = update.effective_user.id
+        settings = settings_manager.get_user_settings(user_id)
+        
+        settings_text = f"""
+**⚙️ Pengaturan Anda**
+
+📝 **Prefix:** `{settings.get('prefix', 'file_')}`
+📤 **Platform:** `{settings.get('platform', 'terabox')}`
+🔄 **Auto Upload:** `{'✅' if settings.get('auto_upload', True) else '❌'}`
+🧹 **Auto Cleanup:** `{'✅' if settings.get('auto_cleanup', True) else '❌'}`
+🔄 **Max Retries:** `{settings.get('max_retries', 3)}`
+
+**Commands untuk mengubah:**
+`/setprefix <prefix>` - Ubah file prefix
+`/setplatform <terabox|doodstream>` - Ubah platform
+`/autoupload <on|off>` - Toggle auto upload  
+`/autocleanup <on|off>` - Toggle auto cleanup
+        """
+        
+        await update.message.reply_text(settings_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"💥 Error in my_settings: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cleanup temporary files"""
+    try:
+        await update.message.reply_text("🧹 Memulai cleanup...")
+        
+        # Cleanup empty directories in downloads
+        cleaned_count = 0
+        for root, dirs, files in os.walk(DOWNLOAD_BASE, topdown=False):
+            for dir_name in dirs:
+                dir_path = Path(root) / dir_name
+                try:
+                    if not any(dir_path.iterdir()):  # Check if directory is empty
+                        dir_path.rmdir()
+                        cleaned_count += 1
+                        logger.info(f"🧹 Cleaned empty directory: {dir_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not remove directory {dir_path}: {e}")
+        
+        # Clear old completed downloads (older than 1 hour)
+        current_time = datetime.now()
+        old_jobs = []
+        for job_id, job in completed_downloads.items():
+            if 'completed_at' in job:
+                try:
+                    completed_time = datetime.fromisoformat(job['completed_at'])
+                    if (current_time - completed_time).total_seconds() > 3600:  # 1 hour
+                        old_jobs.append(job_id)
+                except:
+                    pass
+        
+        for job_id in old_jobs:
+            del completed_downloads[job_id]
+        
+        await update.message.reply_text(
+            f"✅ Cleanup selesai!\n"
+            f"📁 Directories dibersihkan: {cleaned_count}\n"
+            f"🗑️ Old jobs dihapus: {len(old_jobs)}"
+        )
+        
+    except Exception as e:
+        logger.error(f"💥 Error in cleanup_command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 def main():
     """Start the bot"""
     logger.info("🚀 Starting Mega Downloader Bot...")
     
-    # HANYA buat base download directory
+    # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
     logger.info(f"📁 Base download directory: {DOWNLOAD_BASE}")
     
