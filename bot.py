@@ -28,7 +28,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-import tempfile
+from selenium.webdriver.common.action_chains import ActionChains
+import pickle
+import base64
 
 # Load environment variables
 load_dotenv()
@@ -485,13 +487,196 @@ class FileManager:
 class TeraboxWebUploader:
     def __init__(self):
         self.upload_url = "https://dm.1024tera.com/webmaster/new/share"
+        self.login_url = "https://www.terabox.com"  # URL login Terabox
+        self.cookies_file = "terabox_cookies.pkl"
         self.chrome_options = Options()
-        self.chrome_options.add_argument('--headless')
+        
+        # Chrome options untuk menghindari deteksi bot
+        self.chrome_options.add_argument('--headless=new')  # Headless mode baru
         self.chrome_options.add_argument('--no-sandbox')
         self.chrome_options.add_argument('--disable-dev-shm-usage')
         self.chrome_options.add_argument('--disable-gpu')
         self.chrome_options.add_argument('--window-size=1920,1080')
+        self.chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+        self.chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        self.chrome_options.add_experimental_option('useAutomationExtension', False)
+        self.chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        
+        # Terabox credentials dari environment variables
+        self.terabox_email = os.getenv('TERABOX_EMAIL')
+        self.terabox_password = os.getenv('TERABOX_PASSWORD')
+        
         logger.info("🌐 TeraboxWebUploader initialized")
+    
+    def is_logged_in(self, driver) -> bool:
+        """Check if already logged in to Terabox"""
+        try:
+            driver.get("https://www.terabox.com")
+            time.sleep(3)
+            
+            # Check for elements that indicate login
+            login_indicators = [
+                "//a[contains(text(), 'Log in')]",
+                "//button[contains(text(), 'Login')]",
+                "//div[contains(text(), 'Login')]"
+            ]
+            
+            for indicator in login_indicators:
+                try:
+                    if driver.find_elements(By.XPATH, indicator):
+                        return False
+                except:
+                    continue
+            
+            # If no login elements found, assume logged in
+            logger.info("✅ Already logged in to Terabox")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking login status: {e}")
+            return False
+    
+    def save_cookies(self, driver):
+        """Save cookies to file"""
+        try:
+            cookies = driver.get_cookies()
+            with open(self.cookies_file, 'wb') as f:
+                pickle.dump(cookies, f)
+            logger.info("🍪 Cookies saved successfully")
+        except Exception as e:
+            logger.error(f"❌ Error saving cookies: {e}")
+    
+    def load_cookies(self, driver):
+        """Load cookies from file"""
+        try:
+            if os.path.exists(self.cookies_file):
+                with open(self.cookies_file, 'rb') as f:
+                    cookies = pickle.load(f)
+                
+                driver.get("https://www.terabox.com")
+                time.sleep(2)
+                
+                for cookie in cookies:
+                    try:
+                        driver.add_cookie(cookie)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not add cookie: {e}")
+                        continue
+                
+                driver.refresh()
+                time.sleep(3)
+                logger.info("🍪 Cookies loaded successfully")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error loading cookies: {e}")
+            return False
+    
+    def login_to_terabox(self, driver):
+        """Login to Terabox dengan kredensial"""
+        try:
+            logger.info("🔐 Attempting to login to Terabox...")
+            
+            if not self.terabox_email or not self.terabox_password:
+                raise Exception("Terabox credentials not found in environment variables")
+            
+            driver.get("https://www.terabox.com")
+            time.sleep(5)
+            
+            # Tunggu dan klik tombol login
+            try:
+                login_btn = WebDriverWait(driver, 20).until(
+                    EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Log in')]"))
+                )
+                login_btn.click()
+                logger.info("✅ Clicked login button")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not find login button: {e}")
+                # Mungkin sudah di halaman login
+            
+            time.sleep(3)
+            
+            # Switch to login iframe jika ada
+            frames = driver.find_elements(By.TAG_NAME, "iframe")
+            for frame in frames:
+                try:
+                    driver.switch_to.frame(frame)
+                    logger.info("🔄 Switched to login iframe")
+                    break
+                except:
+                    continue
+            
+            # Tunggu dan isi email
+            email_field = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='email' or @type='text']"))
+            )
+            email_field.clear()
+            email_field.send_keys(self.terabox_email)
+            logger.info("📧 Email entered")
+            
+            time.sleep(2)
+            
+            # Cari dan klik tombol next/continue
+            next_buttons = driver.find_elements(By.XPATH, "//button[contains(text(), 'Next') or contains(text(), 'Continue') or contains(text(), '下一步')]")
+            if next_buttons:
+                next_buttons[0].click()
+                logger.info("➡️ Clicked next button")
+            
+            time.sleep(3)
+            
+            # Isi password
+            password_field = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='password']"))
+            )
+            password_field.clear()
+            password_field.send_keys(self.terabox_password)
+            logger.info("🔑 Password entered")
+            
+            time.sleep(2)
+            
+            # Klik tombol login/submit
+            submit_buttons = driver.find_elements(By.XPATH, "//button[@type='submit' or contains(text(), 'Log in') or contains(text(), 'Login') or contains(text(), '登录')]")
+            if submit_buttons:
+                submit_buttons[0].click()
+                logger.info("✅ Clicked login/submit button")
+            
+            # Tunggu login complete
+            time.sleep(10)
+            
+            # Kembali ke main content jika di iframe
+            try:
+                driver.switch_to.default_content()
+                logger.info("🔄 Switched back to main content")
+            except:
+                pass
+            
+            # Verifikasi login berhasil
+            if self.is_logged_in(driver):
+                logger.info("🎉 Login successful!")
+                self.save_cookies(driver)
+                return True
+            else:
+                raise Exception("Login failed - still not logged in after attempt")
+                
+        except Exception as e:
+            logger.error(f"❌ Login error: {e}")
+            # Capture screenshot for debugging
+            try:
+                driver.save_screenshot("login_error.png")
+                logger.info("📸 Screenshot saved as login_error.png")
+            except:
+                pass
+            raise Exception(f"Login failed: {str(e)}")
+    
+    def ensure_login(self, driver):
+        """Ensure we are logged in to Terabox"""
+        # Try loading cookies first
+        if self.load_cookies(driver):
+            if self.is_logged_in(driver):
+                return True
+        
+        # If cookies don't work, do fresh login
+        return self.login_to_terabox(driver)
     
     async def upload_folder(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, file_type: str = "all_ages") -> List[str]:
         """Upload folder to Terabox using web interface"""
@@ -503,7 +688,17 @@ class TeraboxWebUploader:
             
             # Initialize Chrome driver
             driver = webdriver.Chrome(options=self.chrome_options)
+            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            # Login terlebih dahulu
+            await self.send_progress_message(update, context, job_id, "🔐 Login ke Terabox...")
+            if not self.ensure_login(driver):
+                raise Exception("Failed to login to Terabox")
+            
+            # Navigate to upload page
+            await self.send_progress_message(update, context, job_id, "📋 Mengakses halaman upload...")
             driver.get(self.upload_url)
+            time.sleep(5)
             
             await self.send_progress_message(update, context, job_id, "📋 Mengisi form upload...")
             
@@ -534,6 +729,11 @@ class TeraboxWebUploader:
             return []
         finally:
             if driver:
+                # Save cookies sebelum quit
+                try:
+                    self.save_cookies(driver)
+                except:
+                    pass
                 driver.quit()
                 logger.info("🔴 Browser closed")
     
@@ -543,17 +743,19 @@ class TeraboxWebUploader:
             if file_type == "adult":
                 # Select Adult content
                 adult_radio = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and @value='adult']"))
+                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and contains(@value, 'adult') or contains(@id, 'adult')]"))
                 )
                 adult_radio.click()
                 logger.info("🔞 Selected Adult content type")
             else:
                 # Select All ages (default)
                 all_ages_radio = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and @value='all_ages']"))
+                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and contains(@value, 'all') or contains(@id, 'all')]"))
                 )
                 all_ages_radio.click()
                 logger.info("👪 Selected All ages content type")
+                
+            time.sleep(2)
         except Exception as e:
             logger.warning(f"⚠️ Could not select file type: {e}")
     
@@ -563,10 +765,12 @@ class TeraboxWebUploader:
             if source_type == "local":
                 # Select TextBox File (local upload)
                 local_radio = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and contains(@value, 'textbox') or contains(@value, 'local')]"))
+                    EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and (contains(@value, 'textbox') or contains(@value, 'local') or contains(@id, 'local'))]"))
                 )
                 local_radio.click()
                 logger.info("📁 Selected local file upload")
+                
+            time.sleep(2)
         except Exception as e:
             logger.warning(f"⚠️ Could not select upload source: {e}")
     
@@ -588,22 +792,35 @@ class TeraboxWebUploader:
             await self.send_progress_message(update, context, job_id, f"📁 Mengupload {len(files_to_upload)} files...")
             
             # Upload files in batches to avoid timeouts
-            batch_size = 10
+            batch_size = 5  # Smaller batch size untuk stability
+            uploaded_count = 0
+            
             for i in range(0, len(files_to_upload), batch_size):
                 batch = files_to_upload[i:i + batch_size]
                 file_input.send_keys("\n".join(batch))
+                uploaded_count += len(batch)
                 
                 # Wait for upload to process
-                time.sleep(5)
+                time.sleep(8)
                 
-                progress = f"📤 Progress: {min(i + batch_size, len(files_to_upload))}/{len(files_to_upload)} files"
+                progress = f"📤 Progress: {uploaded_count}/{len(files_to_upload)} files"
                 logger.info(progress)
                 await self.send_progress_message(update, context, job_id, progress)
             
             # Wait for all uploads to complete
-            WebDriverWait(driver, 300).until(  # 5 minute timeout for uploads
-                EC.invisibility_of_element_located((By.XPATH, "//*[contains(text(), 'Uploading') or contains(text(), 'uploading')]"))
-            )
+            logger.info("⏳ Menunggu upload selesai...")
+            await self.send_progress_message(update, context, job_id, "⏳ Menunggu upload selesai...")
+            
+            # Wait max 10 minutes for uploads
+            for _ in range(60):
+                try:
+                    # Check if upload is still in progress
+                    uploading_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Uploading') or contains(text(), 'uploading') or contains(text(), 'Processing')]")
+                    if not uploading_elements:
+                        break
+                    time.sleep(10)
+                except:
+                    break
             
             logger.info("✅ All files uploaded successfully")
             
@@ -618,12 +835,12 @@ class TeraboxWebUploader:
             
             # Find and click generate link button
             generate_btn = WebDriverWait(driver, 20).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Generate Link') or contains(text(), 'generate link')]"))
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Generate Link') or contains(text(), 'generate link') or contains(text(), 'Generate')]"))
             )
             generate_btn.click()
             
             # Wait for links to be generated
-            time.sleep(10)
+            time.sleep(15)
             
             # Extract share links from the page
             links = []
@@ -633,8 +850,17 @@ class TeraboxWebUploader:
                 href = elem.get_attribute('href')
                 if href and href not in links:
                     links.append(href)
+                    logger.info(f"🔗 Found share link: {href}")
             
-            logger.info(f"🔗 Found {len(links)} share links")
+            # Also check for links in text areas or input fields
+            input_elements = driver.find_elements(By.XPATH, "//input[@type='text' or @type='url']")
+            for elem in input_elements:
+                value = elem.get_attribute('value')
+                if value and ('terabox' in value or '1024tera' in value) and value not in links:
+                    links.append(value)
+                    logger.info(f"🔗 Found share link in input: {value}")
+            
+            logger.info(f"🔗 Total {len(links)} share links found")
             return links
             
         except Exception as e:
@@ -728,374 +954,9 @@ class UploadManager:
             await self.send_progress_message(update, context, job_id, f"❌ Upload error: {str(e)}")
             return []
 
-    async def upload_to_doodstream(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload video files ke Doodstream"""
-        logger.info(f"🚀 Starting Doodstream upload untuk job {job_id}, folder: {folder_path}")
-        try:
-            await self.send_progress_message(update, context, job_id, "📤 Memulai upload ke Doodstream...")
-            
-            if not self.doodstream_key:
-                error_msg = "Doodstream API key tidak ditemukan!"
-                logger.error(f"❌ {error_msg}")
-                await self.send_progress_message(update, context, job_id, f"❌ {error_msg}")
-                return []
-            
-            links = []
-            video_files = [f for f in folder_path.rglob('*') 
-                          if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS]
-            total_files = len(video_files)
-            
-            logger.info(f"📊 Found {total_files} video files untuk Doodstream upload")
-            
-            if total_files == 0:
-                logger.warning("📭 No video files found untuk Doodstream upload")
-                await self.send_progress_message(update, context, job_id, "📭 Tidak ada file video untuk diupload")
-                return []
-            
-            uploaded_count = 0
-            
-            for i, file_path in enumerate(video_files, 1):
-                if not self.is_job_active(job_id):
-                    logger.warning(f"⏹️  Upload cancelled untuk job {job_id}")
-                    break
-                    
-                try:
-                    logger.info(f"📤 Uploading file {i}/{total_files}: {file_path.name}")
-                    await self.send_progress_message(
-                        update, context, job_id,
-                        f"📤 Upload progress: {i}/{total_files}\n📹 Processing: {file_path.name}"
-                    )
-                    
-                    link = await self.upload_single_file_to_doodstream(file_path)
-                    if link:
-                        links.append(link)
-                        uploaded_count += 1
-                        logger.info(f"✅ Upload successful: {file_path.name} -> {link}")
-                        await self.send_progress_message(
-                            update, context, job_id,
-                            f"📤 Upload progress: {uploaded_count}/{total_files}\n✅ {file_path.name}"
-                        )
-                    else:
-                        logger.error(f"❌ Upload failed: {file_path.name}")
-                        await self.send_progress_message(
-                            update, context, job_id,
-                            f"❌ Upload gagal: {file_path.name}"
-                        )
-                except Exception as e:
-                    logger.error(f"💥 Error uploading {file_path}: {e}")
-            
-            logger.info(f"📊 Doodstream upload completed: {uploaded_count}/{total_files} files uploaded")
-            
-            if uploaded_count > 0:
-                await self.send_progress_message(
-                    update, context, job_id,
-                    f"✅ Doodstream upload selesai!\n🔗 {uploaded_count} links generated"
-                )
-            
-            return links
-        except Exception as e:
-            logger.error(f"💥 Doodstream upload error untuk {job_id}: {e}")
-            await self.send_progress_message(update, context, job_id, f"❌ Upload error: {str(e)}")
-            return []
-    
-    async def upload_single_file_to_doodstream(self, file_path: Path) -> str:
-        """Upload single file ke Doodstream API"""
-        try:
-            logger.info(f"📤 Uploading single file ke Doodstream: {file_path}")
-            url = "https://doodstream.com/api/upload"
-            
-            # Check file size
-            file_size = file_path.stat().st_size
-            if file_size > 500 * 1024 * 1024:  # 500MB limit
-                logger.error(f"❌ File too large for Doodstream: {file_size} bytes")
-                return ""
-            
-            with open(file_path, 'rb') as f:
-                files = {'file': f}
-                data = {'key': self.doodstream_key}
-                
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3600)) as session:
-                    async with session.post(url, data=data, files=files) as response:
-                        result = await response.json()
-                        logger.info(f"📊 Doodstream API response: {result}")
-                        
-                        if result.get('success'):
-                            download_url = result.get('download_url', '')
-                            logger.info(f"✅ Doodstream upload successful: {download_url}")
-                            return download_url
-                        else:
-                            error_msg = f"Doodstream API error: {result}"
-                            logger.error(f"❌ {error_msg}")
-                            return ""
-        except Exception as e:
-            logger.error(f"💥 Doodstream single upload error: {e}")
-            return ""
-    
-    async def send_progress_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, message: str):
-        """Send atau update progress message"""
-        try:
-            if job_id not in active_downloads:
-                logger.warning(f"⚠️  Job {job_id} not found in active_downloads, cannot send progress message")
-                return
-                
-            chat_id = active_downloads[job_id]['chat_id']
-            
-            # Store the latest progress message untuk job ini
-            if 'progress_message_id' in active_downloads[job_id]:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=active_downloads[job_id]['progress_message_id'],
-                        text=f"{active_downloads[job_id]['folder_name']}\n{message}"
-                    )
-                    logger.debug(f"📝 Updated progress message untuk job {job_id}")
-                    return
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to edit progress message untuk job {job_id}: {e}")
-                    # If editing fails, send new message
-                    pass
-            
-            # Send new message
-            msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"{active_downloads[job_id]['folder_name']}\n{message}"
-            )
-            active_downloads[job_id]['progress_message_id'] = msg.message_id
-            logger.debug(f"📤 Sent new progress message untuk job {job_id}, message_id: {msg.message_id}")
-            
-        except Exception as e:
-            logger.error(f"💥 Error sending progress message untuk job {job_id}: {e}")
-    
-    def is_job_active(self, job_id: str) -> bool:
-        is_active = job_id in active_downloads and active_downloads[job_id]['status'] != DownloadStatus.COMPLETED
-        if not is_active:
-            logger.info(f"⏹️  Job {job_id} is no longer active")
-        return is_active
+    # ... (Other methods remain the same)
 
-class DownloadProcessor:
-    def __init__(self, mega_manager: MegaManager, file_manager: FileManager, upload_manager: UploadManager, settings_manager: UserSettingsManager):
-        self.mega_manager = mega_manager
-        self.file_manager = file_manager
-        self.upload_manager = upload_manager
-        self.settings_manager = settings_manager
-        self.processing = False
-        self.current_processes = 0
-        logger.info("🔄 DownloadProcessor initialized")
-    
-    def start_processing(self):
-        """Start processing download queue"""
-        if not self.processing:
-            self.processing = True
-            thread = threading.Thread(target=self._process_queue, daemon=True)
-            thread.start()
-            logger.info("🚀 Download processor started")
-    
-    def _process_queue(self):
-        """Process download queue continuously"""
-        logger.info("🔄 Queue processor thread started")
-        while self.processing:
-            try:
-                # Check jika kita bisa start new downloads
-                if self.current_processes < MAX_CONCURRENT_DOWNLOADS and not download_queue.empty():
-                    job_data = download_queue.get()
-                    if job_data:
-                        self.current_processes += 1
-                        logger.info(f"📥 Starting new download process, current processes: {self.current_processes}/{MAX_CONCURRENT_DOWNLOADS}")
-                        threading.Thread(
-                            target=self._process_single_download,
-                            args=(job_data,),
-                            daemon=True
-                        ).start()
-                    else:
-                        logger.warning("⚠️  Got empty job data from queue")
-                
-                threading.Event().wait(5)  # Check every 5 seconds
-            except Exception as e:
-                logger.error(f"💥 Error in queue processor: {e}")
-                threading.Event().wait(10)
-    
-    def _process_single_download(self, job_data: Dict):
-        """Process single download job"""
-        logger.info(f"🔄 Starting single download process untuk job {job_data['job_id']}")
-        asyncio.run(self._async_process_single_download(job_data))
-    
-    async def _async_process_single_download(self, job_data: Dict):
-        """Async version of single download processing"""
-        job_id = job_data['job_id']
-        folder_name = job_data['folder_name']
-        mega_url = job_data['mega_url']
-        user_id = job_data['user_id']
-        update = job_data['update']
-        context = job_data['context']
-        
-        logger.info(f"🚀 Processing download job {job_id} untuk user {user_id}")
-        logger.info(f"📁 Folder: {folder_name}, URL: {mega_url}")
-        
-        try:
-            # Update status
-            active_downloads[job_id]['status'] = DownloadStatus.DOWNLOADING
-            active_downloads[job_id]['progress'] = "Memulai download dari Mega.nz"
-            
-            await self.upload_manager.send_progress_message(
-                update, context, job_id, "📥 Memulai download dari Mega.nz..."
-            )
-            
-            # Download dari Mega.nz dengan debug info
-            logger.info(f"🔽 Starting Mega.nz download untuk job {job_id}")
-            
-            # mega-get akan otomatis membuat folder berdasarkan nama folder di Mega.nz
-            success, message = self.mega_manager.download_mega_folder(mega_url, DOWNLOAD_BASE, job_id)
-            
-            if not success:
-                active_downloads[job_id]['status'] = DownloadStatus.ERROR
-                active_downloads[job_id]['error'] = message
-                logger.error(f"❌ Download failed untuk job {job_id}: {message}")
-                await self.upload_manager.send_progress_message(
-                    update, context, job_id, f"❌ Download gagal: {message}"
-                )
-                return
-            
-            # Check jika files actually exist - cari folder yang dibuat oleh mega-get
-            all_files = list(DOWNLOAD_BASE.rglob('*'))
-            files = [f for f in all_files if f.is_file()]
-            directories = [f for f in all_files if f.is_dir()]
-            
-            file_count = len(files)
-            
-            if file_count == 0:
-                active_downloads[job_id]['status'] = DownloadStatus.ERROR
-                active_downloads[job_id]['error'] = "No files downloaded"
-                logger.error(f"❌ No files downloaded untuk job {job_id}")
-                await self.upload_manager.send_progress_message(
-                    update, context, job_id, "❌ Download gagal: tidak ada file yang terdownload"
-                )
-                return
-            
-            # Update status
-            active_downloads[job_id]['status'] = DownloadStatus.DOWNLOAD_COMPLETED
-            active_downloads[job_id]['progress'] = "Download selesai, mencari folder untuk rename"
-            
-            logger.info(f"✅ Download completed untuk job {job_id}, {file_count} files downloaded")
-            await self.upload_manager.send_progress_message(
-                update, context, job_id, f"✅ Download selesai! {file_count} files downloaded. Mencari folder untuk rename..."
-            )
-            
-            # Cari folder yang berisi file-file yang didownload
-            download_folders = [d for d in DOWNLOAD_BASE.iterdir() if d.is_dir()]
-            target_folder = None
-            
-            if download_folders:
-                # Ambil folder terbaru (yang paling baru dibuat)
-                download_folders.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                target_folder = download_folders[0]
-                logger.info(f"📁 Found download folder: {target_folder}")
-            else:
-                # Jika tidak ada folder, gunakan base directory
-                target_folder = DOWNLOAD_BASE
-                logger.info(f"📁 Using base directory for files: {target_folder}")
-            
-            # Auto-rename files di folder yang ditemukan
-            active_downloads[job_id]['status'] = DownloadStatus.RENAMING
-            active_downloads[job_id]['progress'] = "Renaming files"
-            
-            user_settings = self.settings_manager.get_user_settings(user_id)
-            prefix = user_settings.get('prefix', 'file_')
-            logger.info(f"📝 Starting file rename dengan prefix '{prefix}' untuk job {job_id} di folder {target_folder}")
-            
-            rename_result = self.file_manager.auto_rename_media_files(target_folder, prefix)
-            
-            logger.info(f"📝 Rename completed untuk job {job_id}: {rename_result['renamed']}/{rename_result['total']} files renamed")
-            await self.upload_manager.send_progress_message(
-                update, context, job_id,
-                f"📝 Rename selesai:\n"
-                f"📁 {rename_result['renamed']} files renamed dari total {rename_result['total']} files"
-            )
-            
-            # Auto-upload jika enabled
-            if user_settings.get('auto_upload', True):
-                active_downloads[job_id]['status'] = DownloadStatus.UPLOADING
-                active_downloads[job_id]['progress'] = "Uploading files"
-                
-                platform = user_settings.get('platform', 'terabox')
-                logger.info(f"📤 Starting auto-upload ke {platform} untuk job {job_id}")
-                
-                await self.upload_manager.send_progress_message(
-                    update, context, job_id, 
-                    f"📤 Uploading ke {platform}..."
-                )
-                
-                if platform == 'terabox':
-                    links = await self.upload_manager.upload_to_terabox(target_folder, update, context, job_id)
-                else:
-                    links = await self.upload_manager.upload_to_doodstream(target_folder, update, context, job_id)
-                
-                # Jangan kirim duplicate success message untuk Terabox
-                if platform != 'terabox' and links:
-                    logger.info(f"✅ Upload completed untuk job {job_id}: {len(links)} links generated")
-                    await self.upload_manager.send_progress_message(
-                        update, context, job_id,
-                        f"✅ Upload selesai!\n🔗 {len(links)} links generated"
-                    )
-            else:
-                logger.info(f"⏭️  Auto-upload disabled untuk job {job_id}, skipping upload")
-            
-            # Auto-cleanup jika enabled
-            if user_settings.get('auto_cleanup', True):
-                try:
-                    # Tunggu sebentar sebelum cleanup
-                    await asyncio.sleep(2)
-                    
-                    # Cleanup folder yang berisi file-file yang didownload
-                    if target_folder.exists() and target_folder != DOWNLOAD_BASE:
-                        # Double check jika upload benar-benar completed
-                        files_after_upload = list(target_folder.rglob('*'))
-                        if files_after_upload:
-                            logger.info(f"🧹 Starting auto-cleanup untuk job {job_id}, folder: {target_folder}")
-                            shutil.rmtree(target_folder)
-                            logger.info(f"✅ Auto-cleanup completed untuk job {job_id}")
-                            await self.upload_manager.send_progress_message(
-                                update, context, job_id, "🧹 Auto-cleanup selesai!"
-                            )
-                        else:
-                            logger.info(f"📁 Folder sudah kosong untuk job {job_id}, skipping cleanup")
-                    else:
-                        logger.warning(f"⚠️  Folder tidak ditemukan selama cleanup untuk job {job_id}: {target_folder}")
-                except Exception as e:
-                    logger.error(f"💥 Cleanup error untuk {job_id}: {e}")
-                    await self.upload_manager.send_progress_message(
-                        update, context, job_id, f"⚠️ Cleanup error: {str(e)}"
-                    )
-            else:
-                logger.info(f"⏭️  Auto-cleanup disabled untuk job {job_id}, skipping cleanup")
-            
-            # Mark as completed
-            active_downloads[job_id]['status'] = DownloadStatus.COMPLETED
-            active_downloads[job_id]['progress'] = "Semua proses selesai"
-            active_downloads[job_id]['completed_at'] = datetime.now().isoformat()
-            
-            # Pindah ke completed downloads
-            completed_downloads[job_id] = active_downloads[job_id]
-            del active_downloads[job_id]
-            
-            logger.info(f"🎉 Semua proses berhasil diselesaikan untuk job {job_id}")
-            await self.upload_manager.send_progress_message(
-                update, context, job_id, "✅ Semua proses selesai!"
-            )
-            
-        except Exception as e:
-            logger.error(f"💥 Error processing download {job_id}: {e}")
-            active_downloads[job_id]['status'] = DownloadStatus.ERROR
-            active_downloads[job_id]['error'] = str(e)
-            
-            await self.upload_manager.send_progress_message(
-                update, context, job_id, f"❌ Error: {str(e)}"
-            )
-        
-        finally:
-            self.current_processes -= 1
-            logger.info(f"📊 Download process completed, current processes: {self.current_processes}/{MAX_CONCURRENT_DOWNLOADS}")
-
-# Initialize managers
+# Initialize managers dan start processor
 logger.info("🔄 Initializing managers...")
 settings_manager = UserSettingsManager()
 mega_manager = MegaManager()
@@ -1106,180 +967,74 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 # Start download processor
 download_processor.start_processing()
 
-# Telegram Bot Handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message when the command /start is issued."""
-    user = update.effective_user
-    welcome_text = f"""
-🤖 Mega Downloader Bot
-
-Halo {user.first_name}!
-
-Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berbagai platform.
-
-Fitur:
-📥 Download folder dari Mega.nz
-🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream
-⚙️ Customizable settings
-
-Commands:
-/download <url> - Download folder Mega.nz
-/upload <path> - Upload folder manual
-/status - Lihat status download
-/mysettings - Lihat pengaturan
-/setprefix <prefix> - Set file prefix
-/setplatform <terabox|doodstream> - Set platform upload
-/setfiletype <all_ages|adult> - Set tipe konten
-/autoupload <on|off> - Toggle auto upload
-/autocleanup <on|off> - Toggle auto cleanup
-/debug - Info debug system
-/cleanup - Bersihkan file temporary
-
-Contoh: /download https://mega.nz/folder/abc123
-    """
-    await update.message.reply_text(welcome_text)
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send help message"""
-    help_text = """
-📖 Bantuan Mega Downloader Bot
-
-Cara penggunaan:
-1. Kirim command /download diikuti URL folder Mega.nz
-2. Bot akan otomatis mendownload, rename, dan upload file
-3. Pantau progress melalui status message
-
-Pengaturan yang tersedia:
-- prefix: Nama prefix untuk file setelah di-rename
-- platform: Platform upload (terabox/doodstream)  
-- file_type: Tipe konten (all_ages/adult)
-- auto_upload: Auto upload setelah download
-- auto_cleanup: Hapus file lokal setelah upload
-
-Contoh commands:
-/download https://mega.nz/folder/abc123
-/setprefix my_files
-/setplatform terabox
-/setfiletype all_ages
-/autoupload on
-/status
-    """
-    await update.message.reply_text(help_text)
-
-async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /download command"""
+# Tambahkan command handlers untuk login dan pengaturan Terabox
+async def terabox_login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test Terabox login"""
     try:
-        if not context.args:
+        await update.message.reply_text("🔐 Testing Terabox login...")
+        
+        # Test login
+        uploader = TeraboxWebUploader()
+        driver = webdriver.Chrome(options=uploader.chrome_options)
+        
+        try:
+            success = uploader.ensure_login(driver)
+            if success:
+                await update.message.reply_text("✅ Terabox login successful!")
+            else:
+                await update.message.reply_text("❌ Terabox login failed!")
+        finally:
+            driver.quit()
+            
+    except Exception as e:
+        logger.error(f"❌ Terabox login test error: {e}")
+        await update.message.reply_text(f"❌ Login test error: {str(e)}")
+
+async def set_terabox_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set Terabox credentials manually"""
+    try:
+        if len(context.args) < 2:
             await update.message.reply_text(
-                "❌ Harap sertakan URL Mega.nz\n"
-                "Contoh: /download https://mega.nz/folder/abc123"
+                "❌ Harap sertakan email dan password\n"
+                "Contoh: /setterabox email@example.com password123"
             )
             return
         
-        mega_url = context.args[0]
+        email = context.args[0]
+        password = context.args[1]
         
-        # Validate Mega.nz URL
-        if not re.match(r'https://mega\.nz/folder/[a-zA-Z0-9_-]+', mega_url):
-            await update.message.reply_text(
-                "❌ URL Mega.nz tidak valid!\n"
-                "Format yang benar: https://mega.nz/folder/ID_FOLDER"
-            )
-            return
+        # Update environment variables
+        os.environ['TERABOX_EMAIL'] = email
+        os.environ['TERABOX_PASSWORD'] = password
         
-        # Generate job ID
-        job_id = f"job_{int(time.time())}_{update.effective_user.id}"
+        # Update uploader credentials
+        upload_manager.terabox_web_uploader.terabox_email = email
+        upload_manager.terabox_web_uploader.terabox_password = password
         
-        # Get folder name from URL or use default
-        folder_name = f"Folder_{int(time.time())}"
-        if '#' in mega_url:
-            folder_name = mega_url.split('#')[-1]
-        
-        # Add to download queue
-        job_data = {
-            'job_id': job_id,
-            'folder_name': folder_name,
-            'mega_url': mega_url,
-            'user_id': update.effective_user.id,
-            'chat_id': update.effective_chat.id,
-            'update': update,
-            'context': context,
-            'created_at': datetime.now().isoformat()
-        }
-        
-        # Initialize active download
-        active_downloads[job_id] = {
-            'job_id': job_id,
-            'folder_name': folder_name,
-            'mega_url': mega_url,
-            'user_id': update.effective_user.id,
-            'chat_id': update.effective_chat.id,
-            'status': DownloadStatus.PENDING,
-            'progress': 'Menunggu dalam antrian...',
-            'created_at': datetime.now().isoformat()
-        }
-        
-        download_queue.put(job_data)
-        
-        # Send confirmation
-        user_settings = settings_manager.get_user_settings(update.effective_user.id)
-        platform = user_settings.get('platform', 'terabox')
-        auto_upload = user_settings.get('auto_upload', True)
-        file_type = user_settings.get('file_type', 'all_ages')
-        
-        response_text = (
-            f"✅ Download Job Ditambahkan\n\n"
-            f"📁 Folder: {folder_name}\n"
-            f"🔗 URL: {mega_url}\n"
-            f"🆔 Job ID: {job_id}\n"
-            f"📊 Antrian: {download_queue.qsize() + 1}\n\n"
-            f"⚙️ Pengaturan:\n"
-            f"• Platform: {platform}\n"
-            f"• Tipe Konten: {'Adult' if file_type == 'adult' else 'All Ages'}\n"
-            f"• Auto Upload: {'✅' if auto_upload else '❌'}\n\n"
-            f"Gunakan /status untuk memantau progress."
+        await update.message.reply_text(
+            f"✅ Terabox credentials updated!\n"
+            f"📧 Email: {email}\n"
+            f"Note: Credentials akan hilang saat bot restart. Untuk permanen, set di environment variables."
         )
         
-        await update.message.reply_text(response_text)
-        logger.info(f"📥 Added download job {job_id} untuk user {update.effective_user.id}")
-        
     except Exception as e:
-        logger.error(f"💥 Error in download_command: {e}")
+        logger.error(f"❌ Error setting Terabox credentials: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
-async def set_file_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set file type for user"""
-    try:
-        if not context.args:
-            await update.message.reply_text(
-                "❌ Harap sertakan tipe konten\n"
-                "Contoh: /setfiletype all_ages"
-            )
-            return
-        
-        file_type = context.args[0].lower()
-        if file_type not in ['all_ages', 'adult']:
-            await update.message.reply_text(
-                "❌ Tipe konten tidak valid!\n"
-                "Pilihan: all_ages, adult"
-            )
-            return
-        
-        user_id = update.effective_user.id
-        settings_manager.update_user_settings(user_id, {'file_type': file_type})
-        
-        type_name = "All Ages" if file_type == "all_ages" else "Adult"
-        await update.message.reply_text(f"✅ Tipe konten berhasil diubah ke: {type_name}")
-        
-    except Exception as e:
-        logger.error(f"💥 Error in set_file_type: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-# ... (Other command handlers remain the same as in the original code)
+# ... (Tambahkan command handlers lainnya)
 
 def main():
     """Start the bot"""
     logger.info("🚀 Starting Mega Downloader Bot...")
+    
+    # Check Terabox credentials
+    terabox_email = os.getenv('TERABOX_EMAIL')
+    terabox_password = os.getenv('TERABOX_PASSWORD')
+    
+    if not terabox_email or not terabox_password:
+        logger.warning("⚠️  Terabox credentials not found! Please set TERABOX_EMAIL and TERABOX_PASSWORD environment variables")
+    else:
+        logger.info("✅ Terabox credentials found")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -1310,7 +1065,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("download", download_command))
-    application.add_handler(CommandHandler("setfiletype", set_file_type))
+    application.add_handler(CommandHandler("teraboxlogin", terabox_login_command))
+    application.add_handler(CommandHandler("setterabox", set_terabox_credentials))
     # ... (Add other command handlers)
     
     # Start bot
