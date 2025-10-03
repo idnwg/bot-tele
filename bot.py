@@ -10,21 +10,15 @@ import threading
 import time
 from datetime import datetime
 from queue import Queue
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 from enum import Enum
-import psutil
 
 from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, 
-    ContextTypes, MessageHandler, filters
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
-import requests
-import aiohttp
 
-# Load environment variables first
+# Load environment variables
 load_dotenv()
 
 # Configure logging
@@ -39,8 +33,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants
-PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
-VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.mpeg'}
 DOWNLOAD_BASE = Path('downloads')
 MAX_CONCURRENT_DOWNLOADS = 2
 
@@ -51,10 +43,7 @@ completed_downloads: Dict[str, Dict] = {}
 
 class DownloadStatus(Enum):
     PENDING = "pending"
-    DOWNLOADING = "downloading" 
-    DOWNLOAD_COMPLETED = "download_completed"
-    RENAMING = "renaming"
-    UPLOADING = "uploading"
+    DOWNLOADING = "downloading"
     COMPLETED = "completed"
     ERROR = "error"
 
@@ -84,12 +73,7 @@ class UserSettingsManager:
         user_str = str(user_id)
         if user_str not in self.settings:
             self.settings[user_str] = {
-                'prefix': 'file_',
-                'platform': 'terabox',
-                'auto_upload': True,
                 'auto_cleanup': True,
-                'max_retries': 3,
-                'file_type': 'all_ages',
             }
             self.save_settings()
         return self.settings[user_str]
@@ -101,117 +85,47 @@ class UserSettingsManager:
         self.settings[user_str].update(new_settings)
         self.save_settings()
 
-class SystemMonitor:
-    @staticmethod
-    def get_system_status() -> Dict[str, Any]:
-        try:
-            disk = psutil.disk_usage('/')
-            memory = psutil.virtual_memory()
-            cpu_percent = psutil.cpu_percent(interval=1)
-            
-            return {
-                'disk_free_gb': disk.free / (1024**3),
-                'disk_total_gb': disk.total / (1024**3),
-                'disk_used_percent': disk.percent,
-                'memory_free_gb': memory.available / (1024**3),
-                'memory_used_percent': memory.percent,
-                'cpu_used_percent': cpu_percent,
-                'active_downloads': len(active_downloads),
-                'queue_size': download_queue.qsize(),
-            }
-        except Exception as e:
-            logger.error(f"Error getting system status: {e}")
-            return {}
-
 class MegaManager:
     def __init__(self):
-        self.accounts = self.load_mega_accounts()
-        self.current_account_index = 0
-        self.mega_get_path = self._get_mega_get_path()
-        logger.info(f"MegaManager initialized with {len(self.accounts)} accounts, mega-get path: {self.mega_get_path}")
+        self.mega_get_path = self._find_mega_get()
+        logger.info(f"MegaManager initialized with mega-get path: {self.mega_get_path}")
     
-    def _get_mega_get_path(self) -> str:
-        """Get the correct path for mega-get command"""
-        possible_paths = [
+    def _find_mega_get(self) -> str:
+        """Find mega-get executable"""
+        # Check common paths
+        paths = [
             '/snap/bin/mega-get',
-            '/usr/bin/mega-get', 
-            '/usr/local/bin/mega-get',
-            'mega-get'
+            '/usr/bin/mega-get',
+            '/usr/local/bin/mega-get'
         ]
         
-        for path in possible_paths:
-            try:
-                result = subprocess.run(['which', path], capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    logger.info(f"Found mega-get at: {path}")
-                    return path
-            except Exception as e:
-                logger.warning(f"Error checking path {path}: {e}")
-                continue
+        for path in paths:
+            if os.path.exists(path):
+                logger.info(f"Found mega-get at: {path}")
+                return path
+        
+        # Try using which command
+        try:
+            result = subprocess.run(['which', 'mega-get'], capture_output=True, text=True)
+            if result.returncode == 0:
+                path = result.stdout.strip()
+                logger.info(f"Found mega-get via which: {path}")
+                return path
+        except:
+            pass
         
         logger.error("mega-get not found in any standard paths!")
-        return "mega-get"
-    
-    def load_mega_accounts(self) -> List[Dict]:
-        accounts = []
-        
-        # Try to load from mega_accounts.json first
-        try:
-            if os.path.exists('mega_accounts.json'):
-                with open('mega_accounts.json', 'r', encoding='utf-8') as f:
-                    file_accounts = json.load(f)
-                    if isinstance(file_accounts, list):
-                        accounts.extend(file_accounts)
-                        logger.info(f"Loaded {len(file_accounts)} accounts from mega_accounts.json")
-        except Exception as e:
-            logger.error(f"Error loading mega_accounts.json: {e}")
-        
-        # Load from environment variables
-        env_accounts = []
-        i = 1
-        while True:
-            email = os.getenv(f'MEGA_EMAIL_{i}')
-            password = os.getenv(f'MEGA_PASSWORD_{i}')
-            if not email or not password:
-                break
-            env_accounts.append({'email': email, 'password': password})
-            i += 1
-        
-        if env_accounts:
-            logger.info(f"Loaded {len(env_accounts)} accounts from environment variables")
-        accounts.extend(env_accounts)
-        
-        if not accounts:
-            logger.warning("No Mega.nz accounts found!")
-        else:
-            logger.info(f"Total {len(accounts)} Mega.nz accounts available")
-        
-        return accounts
-    
-    def check_disk_space(self, required_gb: float = 5.0) -> Tuple[bool, float]:
-        try:
-            disk = psutil.disk_usage('/')
-            free_gb = disk.free / (1024**3)
-            has_space = free_gb >= required_gb
-            return has_space, free_gb
-        except Exception as e:
-            logger.error(f"Error checking disk space: {e}")
-            return False, 0.0
+        return 'mega-get'  # Fallback
     
     def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str]:
         logger.info(f"Starting download for job {job_id}")
         
         try:
-            # Check disk space
-            has_space, free_gb = self.check_disk_space(5.0)
-            if not has_space:
-                return False, f"Insufficient disk space: {free_gb:.2f}GB free"
-            
             # Ensure download directory exists
             download_path.mkdir(parents=True, exist_ok=True)
             
             # Download using mega-get
-            cmd = ['mega-get', folder_url, str(download_path)]
+            cmd = [self.mega_get_path, folder_url, str(download_path)]
             
             logger.info(f"Executing: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -234,157 +148,9 @@ class MegaManager:
         except Exception as e:
             return False, f"Download error: {str(e)}"
 
-class FileManager:
-    @staticmethod
-    def auto_rename_media_files(folder_path: Path, prefix: str) -> Dict:
-        try:
-            media_files = []
-            for ext in PHOTO_EXTENSIONS | VIDEO_EXTENSIONS:
-                media_files.extend(folder_path.rglob(f'*{ext}'))
-                media_files.extend(folder_path.rglob(f'*{ext.upper()}'))
-            
-            media_files = list(set(media_files))
-            media_files.sort()
-            
-            renamed_count = 0
-            for number, file_path in enumerate(media_files, 1):
-                number_str = f"{number:02d}"
-                new_name = f"{prefix} {number_str}{file_path.suffix}"
-                new_path = file_path.parent / new_name
-                
-                try:
-                    if file_path != new_path:
-                        if new_path.exists():
-                            timestamp = int(time.time())
-                            new_name = f"{prefix} {number_str}_{timestamp}{file_path.suffix}"
-                            new_path = file_path.parent / new_name
-                        
-                        file_path.rename(new_path)
-                        renamed_count += 1
-                except Exception as e:
-                    logger.error(f"Error renaming {file_path}: {e}")
-                    continue
-            
-            return {'renamed': renamed_count, 'total': len(media_files)}
-        except Exception as e:
-            logger.error(f"Error in auto_rename: {e}")
-            return {'renamed': 0, 'total': 0}
-
-class SimpleUploadManager:
-    def __init__(self):
-        self.doodstream_key = os.getenv('DOODSTREAM_API_KEY')
-        logger.info("UploadManager initialized")
-    
-    async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Simplified Terabox upload"""
-        logger.info(f"Terabox upload requested for {folder_path}")
-        await self.send_progress_message(update, context, job_id, 
-            "❌ Terabox upload sedang dalam perbaikan.\n"
-            "📤 Silakan gunakan platform lain atau upload manual."
-        )
-        return []
-    
-    async def upload_to_doodstream(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload to Doodstream"""
-        try:
-            await self.send_progress_message(update, context, job_id, "📤 Memulai upload ke Doodstream...")
-            
-            if not self.doodstream_key:
-                await self.send_progress_message(update, context, job_id, "❌ Doodstream API key tidak ditemukan")
-                return []
-            
-            video_files = [f for f in folder_path.rglob('*') if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS]
-            
-            if not video_files:
-                await self.send_progress_message(update, context, job_id, "📭 Tidak ada file video untuk diupload")
-                return []
-            
-            links = []
-            for i, file_path in enumerate(video_files, 1):
-                if not self.is_job_active(job_id):
-                    break
-                    
-                await self.send_progress_message(update, context, job_id, f"📤 Upload {i}/{len(video_files)}: {file_path.name}")
-                
-                link = await self.upload_single_file_to_doodstream(file_path)
-                if link:
-                    links.append(link)
-                    logger.info(f"Upload successful: {link}")
-            
-            if links:
-                await self.send_progress_message(update, context, job_id, f"✅ Upload selesai! {len(links)} links")
-            else:
-                await self.send_progress_message(update, context, job_id, "❌ Tidak ada link yang dihasilkan")
-            
-            return links
-            
-        except Exception as e:
-            logger.error(f"Doodstream upload error: {e}")
-            await self.send_progress_message(update, context, job_id, f"❌ Upload error: {str(e)}")
-            return []
-    
-    async def upload_single_file_to_doodstream(self, file_path: Path) -> str:
-        """Upload single file to Doodstream"""
-        try:
-            url = "https://doodstream.com/api/upload"
-            
-            with open(file_path, 'rb') as f:
-                files = {'file': f}
-                data = {'key': self.doodstream_key}
-                
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3600)) as session:
-                    async with session.post(url, data=data, files=files) as response:
-                        result = await response.json()
-                        logger.info(f"Doodstream API response: {result}")
-                        
-                        if result.get('success'):
-                            download_url = result.get('download_url', '')
-                            logger.info(f"Doodstream upload successful: {download_url}")
-                            return download_url
-                        else:
-                            logger.error(f"Doodstream API error: {result}")
-                            return ""
-        except Exception as e:
-            logger.error(f"Doodstream single upload error: {e}")
-            return ""
-    
-    async def send_progress_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, message: str):
-        """Send progress message"""
-        try:
-            if job_id not in active_downloads:
-                return
-                
-            chat_id = active_downloads[job_id]['chat_id']
-            
-            if 'progress_message_id' in active_downloads[job_id]:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=active_downloads[job_id]['progress_message_id'],
-                        text=f"{active_downloads[job_id]['folder_name']}\n{message}"
-                    )
-                    return
-                except Exception:
-                    pass
-            
-            msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"{active_downloads[job_id]['folder_name']}\n{message}"
-            )
-            active_downloads[job_id]['progress_message_id'] = msg.message_id
-            
-        except Exception as e:
-            logger.error(f"Error sending progress message: {e}")
-    
-    def is_job_active(self, job_id: str) -> bool:
-        return job_id in active_downloads and active_downloads[job_id]['status'] != DownloadStatus.COMPLETED
-
-# TAMBAHKAN CLASS DownloadProcessor YANG HILANG
 class DownloadProcessor:
-    def __init__(self, mega_manager: MegaManager, file_manager: FileManager, upload_manager: SimpleUploadManager, settings_manager: UserSettingsManager):
+    def __init__(self, mega_manager: MegaManager, settings_manager: UserSettingsManager):
         self.mega_manager = mega_manager
-        self.file_manager = file_manager
-        self.upload_manager = upload_manager
         self.settings_manager = settings_manager
         self.processing = False
         self.current_processes = 0
@@ -438,7 +204,7 @@ class DownloadProcessor:
         try:
             # Update status
             active_downloads[job_id]['status'] = DownloadStatus.DOWNLOADING
-            await self.upload_manager.send_progress_message(update, context, job_id, "📥 Memulai download dari Mega.nz...")
+            await self.send_progress_message(update, context, job_id, "📥 Memulai download dari Mega.nz...")
             
             # Download from Mega.nz
             success, message = self.mega_manager.download_mega_folder(mega_url, DOWNLOAD_BASE, job_id)
@@ -446,7 +212,7 @@ class DownloadProcessor:
             if not success:
                 active_downloads[job_id]['status'] = DownloadStatus.ERROR
                 active_downloads[job_id]['error'] = message
-                await self.upload_manager.send_progress_message(update, context, job_id, f"❌ Download gagal: {message}")
+                await self.send_progress_message(update, context, job_id, f"❌ Download gagal: {message}")
                 return
             
             # Find downloaded folder
@@ -465,34 +231,15 @@ class DownloadProcessor:
             files = list(target_folder.rglob('*'))
             file_count = len([f for f in files if f.is_file()])
             
-            await self.upload_manager.send_progress_message(update, context, job_id, f"✅ Download selesai! {file_count} files downloaded")
-            
-            # Auto-rename files
-            active_downloads[job_id]['status'] = DownloadStatus.RENAMING
-            user_settings = self.settings_manager.get_user_settings(user_id)
-            prefix = user_settings.get('prefix', 'file_')
-            
-            rename_result = self.file_manager.auto_rename_media_files(target_folder, prefix)
-            await self.upload_manager.send_progress_message(update, context, job_id, f"📝 Rename selesai: {rename_result['renamed']}/{rename_result['total']} files")
-            
-            # Auto-upload if enabled
-            if user_settings.get('auto_upload', True):
-                active_downloads[job_id]['status'] = DownloadStatus.UPLOADING
-                platform = user_settings.get('platform', 'terabox')
-                
-                await self.upload_manager.send_progress_message(update, context, job_id, f"📤 Uploading ke {platform}...")
-                
-                if platform == 'terabox':
-                    links = await self.upload_manager.upload_to_terabox(target_folder, update, context, job_id)
-                else:
-                    links = await self.upload_manager.upload_to_doodstream(target_folder, update, context, job_id)
+            await self.send_progress_message(update, context, job_id, f"✅ Download selesai! {file_count} files downloaded")
             
             # Auto-cleanup if enabled
+            user_settings = self.settings_manager.get_user_settings(user_id)
             if user_settings.get('auto_cleanup', True):
                 try:
                     if target_folder.exists() and target_folder != DOWNLOAD_BASE:
                         shutil.rmtree(target_folder)
-                        await self.upload_manager.send_progress_message(update, context, job_id, "🧹 Auto-cleanup selesai!")
+                        await self.send_progress_message(update, context, job_id, "🧹 Auto-cleanup selesai!")
                 except Exception as e:
                     logger.error(f"Cleanup error: {e}")
             
@@ -502,24 +249,50 @@ class DownloadProcessor:
             completed_downloads[job_id] = active_downloads[job_id]
             del active_downloads[job_id]
             
-            await self.upload_manager.send_progress_message(update, context, job_id, "✅ Semua proses selesai!")
+            await self.send_progress_message(update, context, job_id, "✅ Semua proses selesai!")
             
         except Exception as e:
             logger.error(f"Error processing download {job_id}: {e}")
             active_downloads[job_id]['status'] = DownloadStatus.ERROR
             active_downloads[job_id]['error'] = str(e)
-            await self.upload_manager.send_progress_message(update, context, job_id, f"❌ Error: {str(e)}")
+            await self.send_progress_message(update, context, job_id, f"❌ Error: {str(e)}")
         
         finally:
             self.current_processes -= 1
+    
+    async def send_progress_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, message: str):
+        """Send progress message"""
+        try:
+            if job_id not in active_downloads:
+                return
+                
+            chat_id = active_downloads[job_id]['chat_id']
+            
+            if 'progress_message_id' in active_downloads[job_id]:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=active_downloads[job_id]['progress_message_id'],
+                        text=f"{active_downloads[job_id]['folder_name']}\n{message}"
+                    )
+                    return
+                except Exception:
+                    pass
+            
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{active_downloads[job_id]['folder_name']}\n{message}"
+            )
+            active_downloads[job_id]['progress_message_id'] = msg.message_id
+            
+        except Exception as e:
+            logger.error(f"Error sending progress message: {e}")
 
 # Initialize managers
 logger.info("Initializing managers...")
 settings_manager = UserSettingsManager()
 mega_manager = MegaManager()
-file_manager = FileManager()
-upload_manager = SimpleUploadManager()
-download_processor = DownloadProcessor(mega_manager, file_manager, upload_manager, settings_manager)
+download_processor = DownloadProcessor(mega_manager, settings_manager)
 
 # Start download processor
 download_processor.start_processing()
@@ -533,21 +306,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Halo {user.first_name}!
 
+Saya adalah bot untuk mendownload folder dari Mega.nz.
+
 Fitur:
 📥 Download folder dari Mega.nz
-🔄 Auto-rename file media  
-📤 Upload ke Doodstream
-⚙️ Customizable settings
+🧹 Auto-cleanup file setelah download
 
 Commands:
 /download <url> - Download folder Mega.nz
 /status - Lihat status download
 /mysettings - Lihat pengaturan
-/setprefix <prefix> - Set file prefix
-/setplatform <doodstream> - Set platform upload
-/autoupload <on|off> - Toggle auto upload
 /autocleanup <on|off> - Toggle auto cleanup
-/debug - Info debug system
 
 Contoh: /download https://mega.nz/folder/abc123
     """
@@ -560,14 +329,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Cara penggunaan:
 1. Kirim command /download diikuti URL folder Mega.nz
-2. Bot akan otomatis mendownload, rename, dan upload file
+2. Bot akan otomatis mendownload folder
 3. Pantau progress melalui status message
 
 Contoh commands:
 /download https://mega.nz/folder/abc123
-/setprefix my_files
-/setplatform doodstream
-/autoupload on
+/autocleanup on
 /status
     """
     await update.message.reply_text(help_text)
@@ -618,8 +385,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send confirmation
         user_settings = settings_manager.get_user_settings(update.effective_user.id)
-        platform = user_settings.get('platform', 'doodstream')
-        auto_upload = user_settings.get('auto_upload', True)
+        auto_cleanup = user_settings.get('auto_cleanup', True)
         
         response_text = (
             f"✅ Download Job Ditambahkan\n\n"
@@ -628,8 +394,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 Job ID: {job_id}\n"
             f"📊 Antrian: {download_queue.qsize() + 1}\n\n"
             f"⚙️ Pengaturan:\n"
-            f"• Platform: {platform}\n"
-            f"• Auto Upload: {'✅' if auto_upload else '❌'}\n\n"
+            f"• Auto Cleanup: {'✅' if auto_cleanup else '❌'}\n\n"
             f"Gunakan /status untuk memantau progress."
         )
         
@@ -649,13 +414,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_active_jobs = {k: v for k, v in active_downloads.items() if v['user_id'] == user_id}
         user_completed_jobs = {k: v for k, v in completed_downloads.items() if v['user_id'] == user_id}
         
-        system_status = SystemMonitor.get_system_status()
-        
         status_text = f"""
-📊 System Status
-💾 Disk: {system_status.get('disk_free_gb', 0):.1f}GB free
-🔄 Active Downloads: {system_status.get('active_downloads', 0)}
-📋 Queue Size: {system_status.get('queue_size', 0)}
+📊 Status
 
 👤 Your Jobs
 ⏳ Active: {len(user_active_jobs)}
@@ -673,65 +433,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Error in status_command: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set file prefix for user"""
-    try:
-        if not context.args:
-            await update.message.reply_text("❌ Harap sertakan prefix\nContoh: /setprefix my_files")
-            return
-        
-        prefix = context.args[0]
-        user_id = update.effective_user.id
-        settings_manager.update_user_settings(user_id, {'prefix': prefix})
-        await update.message.reply_text(f"✅ Prefix berhasil diubah menjadi: {prefix}")
-        
-    except Exception as e:
-        logger.error(f"Error in set_prefix: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set upload platform for user"""
-    try:
-        if not context.args:
-            await update.message.reply_text("❌ Harap sertakan platform\nContoh: /setplatform doodstream")
-            return
-        
-        platform = context.args[0].lower()
-        if platform not in ['doodstream']:  # Hanya doodstream yang tersedia untuk sekarang
-            await update.message.reply_text("❌ Platform tidak valid! Hanya 'doodstream' yang tersedia.")
-            return
-        
-        user_id = update.effective_user.id
-        settings_manager.update_user_settings(user_id, {'platform': platform})
-        await update.message.reply_text(f"✅ Platform upload berhasil diubah ke: {platform}")
-        
-    except Exception as e:
-        logger.error(f"Error in set_platform: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle auto upload setting"""
-    try:
-        if not context.args:
-            await update.message.reply_text("❌ Harap sertakan on/off\nContoh: /autoupload on")
-            return
-        
-        toggle = context.args[0].lower()
-        if toggle not in ['on', 'off']:
-            await update.message.reply_text("❌ Pilihan: on atau off")
-            return
-        
-        user_id = update.effective_user.id
-        auto_upload = toggle == 'on'
-        settings_manager.update_user_settings(user_id, {'auto_upload': auto_upload})
-        
-        status = "AKTIF" if auto_upload else "NON-AKTIF"
-        await update.message.reply_text(f"✅ Auto upload diubah menjadi: {status}")
-        
-    except Exception as e:
-        logger.error(f"Error in auto_upload_toggle: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -766,16 +467,9 @@ async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_text = f"""
 ⚙️ Pengaturan Anda
 
-📝 Prefix: {settings.get('prefix', 'file_')}
-📤 Platform: {settings.get('platform', 'doodstream')}
-🔄 Auto Upload: {'✅' if settings.get('auto_upload', True) else '❌'}
 🧹 Auto Cleanup: {'✅' if settings.get('auto_cleanup', True) else '❌'}
-🔄 Max Retries: {settings.get('max_retries', 3)}
 
 Commands untuk mengubah:
-/setprefix <prefix> - Ubah file prefix
-/setplatform <doodstream> - Ubah platform
-/autoupload <on|off> - Toggle auto upload  
 /autocleanup <on|off> - Toggle auto cleanup
         """
         
@@ -783,35 +477,6 @@ Commands untuk mengubah:
         
     except Exception as e:
         logger.error(f"Error in my_settings: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show debug information"""
-    try:
-        system_status = SystemMonitor.get_system_status()
-        
-        debug_text = f"""
-🐛 Debug Information
-
-System Resources:
-💾 Disk Free: {system_status.get('disk_free_gb', 0):.1f}GB
-💾 Disk Used: {system_status.get('disk_used_percent', 0):.1f}%
-🧠 Memory Used: {system_status.get('memory_used_percent', 0):.1f}%
-⚡ CPU Used: {system_status.get('cpu_used_percent', 0):.1f}%
-
-Bot Status:
-🔄 Active Downloads: {system_status.get('active_downloads', 0)}
-📋 Queue Size: {system_status.get('queue_size', 0)}
-
-Mega.nz Status:
-✅ mega-get Available: {os.path.exists('/usr/bin/mega-get')}
-📧 Accounts: {len(mega_manager.accounts)}
-        """
-        
-        await update.message.reply_text(debug_text)
-        
-    except Exception as e:
-        logger.error(f"Error in debug_command: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 def main():
@@ -823,14 +488,8 @@ def main():
     logger.info(f"Base download directory: {DOWNLOAD_BASE}")
     
     # Check if mega-get is available
-    if not os.path.exists('/usr/bin/mega-get'):
-        logger.error("mega-get is not available! Please install mega-cmd")
-        return
-    
-    # Check if accounts are configured
-    if not mega_manager.accounts:
-        logger.error("No Mega.nz accounts configured!")
-        return
+    if not os.path.exists(mega_manager.mega_get_path):
+        logger.warning(f"mega-get not found at {mega_manager.mega_get_path}. Please install mega-cmd.")
     
     # Initialize bot
     token = os.getenv('BOT_TOKEN')
@@ -845,12 +504,8 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("download", download_command))
     application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("setprefix", set_prefix))
-    application.add_handler(CommandHandler("setplatform", set_platform))
-    application.add_handler(CommandHandler("autoupload", auto_upload_toggle))
     application.add_handler(CommandHandler("autocleanup", auto_cleanup_toggle))
     application.add_handler(CommandHandler("mysettings", my_settings))
-    application.add_handler(CommandHandler("debug", debug_command))
     
     # Start bot
     logger.info("Bot started successfully!")
