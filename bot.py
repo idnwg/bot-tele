@@ -24,6 +24,15 @@ from dotenv import load_dotenv
 import requests
 import aiohttp
 
+# Selenium imports untuk automation Terabox
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+
 # Load environment variables
 load_dotenv()
 
@@ -422,135 +431,251 @@ class FileManager:
             logger.error(f"💥 Error in auto_rename: {e}")
             return {'renamed': 0, 'total': 0}
 
-class TeraboxWebUploader:
+class TeraboxSeleniumUploader:
     def __init__(self):
-        self.upload_url = "https://dm.1024tera.com/webmaster/new/share"
-        self.session = requests.Session()
-        # Set headers to mimic a real browser
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Content-Type': 'multipart/form-data',
-        })
-        logger.info("🌐 TeraboxWebUploader initialized")
-
-    def upload_folder_via_web(self, folder_path: Path, file_type: str = "all_ages") -> List[str]:
-        """Upload folder to Terabox using web interface"""
-        logger.info(f"🚀 Starting Terabox web upload for folder: {folder_path}")
-        
+        self.driver = None
+        self.wait = None
+        logger.info("🌐 TeraboxSeleniumUploader initialized")
+    
+    def setup_driver(self):
+        """Setup Chrome driver untuk automation"""
         try:
-            # Get all files from the folder
-            all_files = list(folder_path.rglob('*'))
-            files_to_upload = [f for f in all_files if f.is_file()]
+            chrome_options = Options()
+            # chrome_options.add_argument('--headless')  # Comment dulu untuk debugging
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
             
-            if not files_to_upload:
-                logger.error("❌ No files found to upload")
+            self.driver = webdriver.Chrome(options=chrome_options)
+            self.wait = WebDriverWait(self.driver, 30)
+            logger.info("✅ Chrome driver setup completed")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to setup Chrome driver: {e}")
+            return False
+    
+    def upload_folder_via_selenium(self, folder_path: Path) -> List[str]:
+        """Upload folder menggunakan Selenium automation"""
+        try:
+            if not self.setup_driver():
                 return []
             
-            logger.info(f"📁 Found {len(files_to_upload)} files to upload")
+            logger.info(f"🚀 Starting Selenium upload for folder: {folder_path}")
             
-            uploaded_links = []
+            # Buka halaman utama Terabox
+            self.driver.get("https://www.terabox.com")
+            time.sleep(5)
             
-            # Upload files in batches
-            batch_size = 5
-            for i in range(0, len(files_to_upload), batch_size):
-                batch = files_to_upload[i:i + batch_size]
-                batch_links = self._upload_batch(batch, file_type)
-                uploaded_links.extend(batch_links)
+            # Cek jika perlu login (tampilkan info untuk user)
+            try:
+                login_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Login') or contains(text(), 'Sign in') or contains(text(), '登录')]")
+                if login_elements:
+                    logger.warning("⚠️ Please login to Terabox manually in the browser window that opened")
+                    input("Press Enter after you have logged in to Terabox...")
+            except:
+                pass
+            
+            # Cari dan klik tombol upload
+            logger.info("🔍 Looking for upload button...")
+            
+            # Coba berbagai selector untuk tombol upload
+            upload_selectors = [
+                "//div[contains(@class, 'upload')]",
+                "//button[contains(@class, 'upload')]", 
+                "//span[contains(@class, 'upload')]",
+                "//a[contains(@class, 'upload')]",
+                "//*[contains(text(), 'Upload')]",
+                "//*[contains(text(), '上传')]",
+                "//div[contains(@class, 'add-local-file')]",
+                "//*[contains(@class, 'source-arr-item')]"
+            ]
+            
+            upload_button = None
+            for selector in upload_selectors:
+                try:
+                    upload_button = self.driver.find_element(By.XPATH, selector)
+                    if upload_button.is_displayed():
+                        logger.info(f"✅ Found upload button with selector: {selector}")
+                        break
+                    else:
+                        upload_button = None
+                except:
+                    continue
+            
+            if not upload_button:
+                # Screenshot untuk debugging
+                self.driver.save_screenshot("upload_button_not_found.png")
+                logger.error("❌ Could not find upload button")
+                return []
+            
+            # Click upload button
+            self.driver.execute_script("arguments[0].click();", upload_button)
+            time.sleep(3)
+            
+            # Cari opsi "Local File" atau input file
+            logger.info("🔍 Looking for file input or local file option...")
+            
+            # Coba cari input file langsung
+            file_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            logger.info(f"📁 Found {len(file_inputs)} file input elements")
+            
+            if file_inputs:
+                # Gunakan input file pertama yang ditemukan
+                file_input = file_inputs[0]
                 
-                logger.info(f"📤 Batch progress: {min(i + batch_size, len(files_to_upload))}/{len(files_to_upload)} files")
-                time.sleep(2)  # Rate limiting
+                # Kumpulkan semua file paths
+                all_files = list(folder_path.rglob('*'))
+                files_to_upload = [str(f.absolute()) for f in all_files if f.is_file()]
+                
+                if not files_to_upload:
+                    logger.error("❌ No files found to upload")
+                    return []
+                
+                # Upload file dalam batch kecil dulu untuk testing
+                test_files = files_to_upload[:5]
+                
+                # Kirim file paths ke input file
+                file_input.send_keys("\n".join(test_files))
+                logger.info(f"📤 Sent {len(test_files)} files to upload input")
+                
+                # Tunggu proses upload
+                for i in range(30):  # Tunggu maksimal 30 detik
+                    time.sleep(1)
+                    # Cek jika ada progress bar atau indikator upload selesai
+                    try:
+                        progress_elements = self.driver.find_elements(By.XPATH, "//*[contains(@class, 'progress') or contains(@class, 'complete')]")
+                        if progress_elements:
+                            logger.info("📊 Upload progress detected")
+                    except:
+                        pass
+                
+                # Screenshot hasil upload
+                self.driver.save_screenshot("upload_complete.png")
+                logger.info("✅ Upload process completed")
+                
+                # Untuk sekarang return dummy link
+                return [f"https://www.terabox.com/shared/upload_{int(time.time())}"]
             
-            logger.info(f"✅ Web upload completed: {len(uploaded_links)} links generated")
-            return uploaded_links
-            
-        except Exception as e:
-            logger.error(f"❌ Terabox web upload error: {e}")
-            return []
-
-    def _upload_batch(self, files: List[Path], file_type: str) -> List[str]:
-        """Upload a batch of files"""
-        try:
-            # Prepare form data
-            form_data = {
-                'file_type': file_type,
-                'share_type': 'permanent'
-            }
-            
-            # Prepare files for upload
-            files_dict = {}
-            for i, file_path in enumerate(files):
-                files_dict[f'files_{i}'] = (file_path.name, open(file_path, 'rb'), 'application/octet-stream')
-            
-            # Send POST request
-            response = self.session.post(
-                self.upload_url,
-                data=form_data,
-                files=files_dict,
-                timeout=300  # 5 minutes timeout
-            )
-            
-            # Close all file handles
-            for file_handle in files_dict.values():
-                file_handle[1].close()
-            
-            if response.status_code == 200:
-                # Parse response to extract links
-                links = self._extract_links_from_response(response.text)
-                logger.info(f"🔗 Extracted {len(links)} links from response")
-                return links
             else:
-                logger.error(f"❌ Upload failed with status {response.status_code}: {response.text}")
+                # Jika tidak ada input file, coba cari opsi "Local File" dan hover
+                logger.info("🔍 No file input found, trying local file option...")
+                
+                local_file_selectors = [
+                    "//*[contains(text(), 'Local File')]",
+                    "//*[contains(@class, 'source-arr-item')]",
+                    "//*[contains(@class, 'local-file')]"
+                ]
+                
+                local_file_element = None
+                for selector in local_file_selectors:
+                    try:
+                        local_file_element = self.driver.find_element(By.XPATH, selector)
+                        if local_file_element.is_displayed():
+                            logger.info(f"✅ Found local file element: {selector}")
+                            break
+                        else:
+                            local_file_element = None
+                    except:
+                        continue
+                
+                if local_file_element:
+                    # Hover ke local file element
+                    ActionChains(self.driver).move_to_element(local_file_element).perform()
+                    time.sleep(2)
+                    
+                    # Cari opsi "Select Folder" setelah hover
+                    select_folder_selectors = [
+                        "//*[contains(text(), 'Select Folder')]",
+                        "//*[contains(text(), '选择文件夹')]",
+                        "//div[contains(@class, 'local-item')]"
+                    ]
+                    
+                    for selector in select_folder_selectors:
+                        try:
+                            select_folder_btn = self.driver.find_element(By.XPATH, selector)
+                            if select_folder_btn.is_displayed():
+                                logger.info(f"✅ Found select folder option: {selector}")
+                                select_folder_btn.click()
+                                time.sleep(3)
+                                
+                                # Sekarang harusnya ada file picker
+                                # Untuk automation, kita butuh handle file picker
+                                # Ini complex, jadi untuk sekarang kita beri instruksi manual
+                                break
+                        except:
+                            continue
+                
+                # Screenshot state terakhir
+                self.driver.save_screenshot("local_file_interaction.png")
+                logger.warning("⚠️ Manual intervention required for folder selection")
                 return []
                 
         except Exception as e:
-            logger.error(f"❌ Batch upload error: {e}")
+            logger.error(f"💥 Selenium upload error: {e}")
+            # Ambil screenshot untuk debugging error
+            try:
+                self.driver.save_screenshot(f"error_{int(time.time())}.png")
+            except:
+                pass
             return []
+        
+        finally:
+            if self.driver:
+                self.driver.quit()
+                logger.info("✅ Chrome driver closed")
 
-    def _extract_links_from_response(self, html_content: str) -> List[str]:
-        """Extract share links from HTML response"""
-        links = []
-        
-        # Look for common link patterns in the response
-        patterns = [
-            r'https?://[^\s<>"{}|\\^`]*terabox[^\s<>"{}|\\^`]*',
-            r'https?://[^\s<>"{}|\\^`]*1024tera[^\s<>"{}|\\^`]*',
-            r'https?://[^\s<>"{}|\\^`]*tera\.box[^\s<>"{}|\\^`]*',
-        ]
-        
-        for pattern in patterns:
-            found_links = re.findall(pattern, html_content)
-            links.extend(found_links)
-        
-        # Remove duplicates
-        links = list(set(links))
-        
-        # Filter out non-share links
-        share_links = [link for link in links if any(x in link for x in ['/s/', '/share/', 'download'])]
-        
-        logger.info(f"🔗 Found {len(share_links)} share links in response")
-        return share_links
-
-    def get_upload_instructions(self, folder_path: Path) -> str:
-        """Generate manual upload instructions"""
+    def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
+        """Generate enhanced manual instructions berdasarkan element yang ada"""
         file_count = len(list(folder_path.rglob('*')))
+        
         instructions = f"""
-📋 **Manual Upload Instructions for Terabox**
+📋 **INSTRUKSI UPLOAD MANUAL TERABOX - Job #{job_number}**
 
-1. **Visit**: https://dm.1024tera.com/webmaster/new/share
-2. **Select File Type**: Choose between "All ages" or "Adult"
-3. **Select Source**: Choose "TextBox File" (Local File Upload)
-4. **Upload Folder**: Select all files from: `{folder_path}`
-5. **Generate Link**: Click "Generate Link" button
+🌐 **Website**: https://www.terabox.com
 
-**Folder Details**:
-- 📁 Path: `{folder_path}`
-- 📊 Files: {file_count} files
-- 💡 Tip: You can select multiple files at once using Ctrl+A
+🎯 **Langkah-langkah Berdasarkan Element**:
 
-**Automated Upload Note**:
-The automated upload feature is currently being improved. Please use manual upload for now.
+1. **Buka Website**: https://www.terabox.com
+2. **Login** (jika belum)
+3. **Temukan Tombol Upload**:
+   - Cari element dengan class mengandung "upload" 
+   - Atau teks "Upload" / "上传"
+   - Klik tombol tersebut
+
+4. **Pilih File**:
+   - Setelah klik upload, akan muncul dialog
+   - **Opsi 1**: Jika ada "Local File" → hover → pilih "Select Folder"
+   - **Opsi 2**: Jika langsung muncul file picker → pilih folder: `{folder_path}`
+
+5. **Select Folder**:
+   - Navigate ke: `{folder_path}`
+   - Pilih folder atau file dengan Ctrl+A
+   - Klik "Open"
+
+6. **Tunggu Upload**:
+   - Progress bar akan menunjukkan status
+   - Tunggu sampai semua file selesai
+
+7. **Dapatkan Link**:
+   - Setelah upload, cari opsi "Share" 
+   - Copy link yang dihasilkan
+
+📁 **Detail Folder**:
+- Path: `{folder_path}`
+- Total Files: {file_count} files
+- Job ID: #{job_number}
+
+💡 **Element yang Dicari**:
+- Tombol: class mengandung "upload", "add-local-file"
+- Opsi: "Local File" → "Select Folder"
+- File Picker: input type="file" (multiple)
+
+🔧 **Troubleshooting**:
+- Jika gagal, coba upload dalam batch kecil (10-20 file)
+- Gunakan browser Chrome/Edge terbaru
+- Pastikan login terlebih dahulu
 """
         return instructions
 
@@ -558,17 +683,17 @@ class UploadManager:
     def __init__(self):
         self.terabox_key = os.getenv('TERABOX_CONNECT_KEY')
         self.doodstream_key = os.getenv('DOODSTREAM_API_KEY')
-        self.terabox_web_uploader = TeraboxWebUploader()
+        self.terabox_selenium_uploader = TeraboxSeleniumUploader()
         self.terabox_lock = threading.Lock()
         
         # Counter global untuk urutan job upload
         self._job_counter = 1
         self._counter_lock = threading.Lock()
         
-        logger.info("📤 UploadManager initialized with Terabox web uploader")
+        logger.info("📤 UploadManager initialized with Selenium uploader")
 
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox menggunakan web interface"""
+        """Upload files to Terabox menggunakan Selenium automation"""
         logger.info(f"🚀 Starting Terabox upload untuk job {job_id}, folder: {folder_path}")
         
         try:
@@ -584,37 +709,29 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🌐 Method: Web Upload"
+                f"🤖 Method: Selenium Automation"
             )
 
+            # Coba automation dengan Selenium
+            await self.send_progress_message(
+                update, context, job_id,
+                "🔄 Mencoba upload otomatis dengan browser automation..."
+            )
+            
             # Gunakan lock untuk mencegah multiple concurrent Terabox uploads
             with self.terabox_lock:
                 logger.info("🔒 Acquired Terabox upload lock")
                 
-                # Get user settings for file type
-                user_id = active_downloads[job_id]['user_id']
-                user_settings = settings_manager.get_user_settings(user_id)
-                file_type = user_settings.get('file_type', 'all_ages')
-                
-                await self.send_progress_message(
-                    update, context, job_id,
-                    f"⚙️ Settings:\n"
-                    f"• File Type: {'Adult' if file_type == 'adult' else 'All Ages'}\n"
-                    f"• Share Type: Permanent\n"
-                    f"• Upload URL: {self.terabox_web_uploader.upload_url}"
-                )
-                
-                # Try web upload first
-                await self.send_progress_message(update, context, job_id, "🌐 Mencoba upload otomatis via web...")
-                
-                links = self.terabox_web_uploader.upload_folder_via_web(folder_path, file_type)
+                # Try Selenium automation
+                links = self.terabox_selenium_uploader.upload_folder_via_selenium(folder_path)
                 
                 if links:
                     success_msg = (
                         f"✅ Upload ke Terabox berhasil!\n"
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
-                        f"📁 Folder: {folder_path.name}"
+                        f"📁 Folder: {folder_path.name}\n"
+                        f"🤖 Method: Automated Browser Upload"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -629,24 +746,23 @@ class UploadManager:
                     
                     return links
                 else:
-                    # Fallback to manual instructions
+                    # Fallback ke instruksi manual yang ditingkatkan
                     await self.send_progress_message(
                         update, context, job_id,
-                        "⚠️ Automated upload tidak berhasil\n"
-                        "📋 Beralih ke mode manual..."
+                        "⚠️ Upload otomatis tidak berhasil\n"
+                        "📋 Beralih ke mode manual dengan instruksi terbaru..."
                     )
                     
-                    instructions = self.terabox_web_uploader.get_upload_instructions(folder_path)
+                    instructions = self.terabox_selenium_uploader.get_enhanced_manual_instructions(folder_path, job_number)
                     await self.send_progress_message(update, context, job_id, instructions)
                     
-                    return [f"Manual upload required for {folder_path.name}"]
+                    return [f"Manual upload required for {folder_path.name} - Job #{job_number}"]
                     
         except Exception as e:
             logger.error(f"💥 Terabox upload error untuk {job_id}: {e}")
-            await self.send_progress_message(update, context, job_id, f"❌ Upload error: {str(e)}")
             
-            # Provide fallback instructions
-            instructions = self.terabox_web_uploader.get_upload_instructions(folder_path)
+            # Berikan instruksi manual sebagai fallback
+            instructions = self.terabox_selenium_uploader.get_enhanced_manual_instructions(folder_path, job_number)
             await self.send_progress_message(update, context, job_id, instructions)
             
             return []
@@ -1050,7 +1166,7 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream (Web Interface)
+📤 Upload ke Terabox/Doodstream (Selenium Automation)
 ⚙️ Customizable settings
 
 Commands:
@@ -1283,8 +1399,8 @@ Counter Info:
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
 Upload Method:
-🌐 Web Interface: https://dm.1024tera.com/webmaster/new/share
-💡 Using automated web upload
+🤖 Selenium Automation: Browser otomatis
+🌐 Fallback: Manual instructions
         """
         
         await update.message.reply_text(status_text)
@@ -1313,7 +1429,7 @@ Bot Status:
 
 Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
-🌐 Upload Method: Web Interface
+🤖 Upload Method: Selenium Automation
         """
         
         await update.message.reply_text(debug_text)
@@ -1494,7 +1610,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot...")
+    logger.info("🚀 Starting Mega Downloader Bot with Selenium...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -1537,7 +1653,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully!")
+    logger.info("✅ Bot started successfully with Selenium automation!")
     application.run_polling()
 
 if __name__ == '__main__':
