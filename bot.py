@@ -435,9 +435,10 @@ class TeraboxPlaywrightUploader:
         self.page = None
         self.terabox_email = os.getenv('TERABOX_EMAIL')
         self.terabox_password = os.getenv('TERABOX_PASSWORD')
-        self.current_domain = None  # Tambahkan untuk menyimpan domain dinamis
-        self.timeout = 30000  # 30 seconds in milliseconds
-        logger.info("🌐 TeraboxPlaywrightUploader initialized dengan login automation")
+        self.current_domain = None
+        self.session_file = "terabox_session.json"
+        self.timeout = 45000  # 45 seconds in milliseconds
+        logger.info("🌐 TeraboxPlaywrightUploader initialized dengan session persistence")
 
     def get_current_domain(self, url: str) -> str:
         """Extract domain from URL"""
@@ -449,16 +450,16 @@ class TeraboxPlaywrightUploader:
             logger.warning(f"⚠️ Could not extract domain from {url}, using fallback: {e}")
             return "dm.1024tera.com"  # fallback domain
 
-    async def setup_browser(self):
-        """Setup Playwright browser dengan configurasi headless"""
+    async def setup_browser(self, use_session: bool = True) -> bool:
+        """Setup Playwright browser dengan session persistence"""
         try:
-            logger.info("🔄 Setting up Playwright browser in HEADLESS mode...")
+            logger.info("🔄 Setting up Playwright browser dengan session persistence...")
             
             self.playwright = await async_playwright().start()
             
             # Launch browser dengan headless mode
             self.browser = await self.playwright.chromium.launch(
-                headless=True,  # HEADLESS MODE untuk server
+                headless=True,
                 args=[
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
@@ -482,13 +483,24 @@ class TeraboxPlaywrightUploader:
                 ]
             )
             
-            # Create context dengan viewport dan user agent
+            # Load session jika ada dan diminta
+            storage_state = None
+            if use_session and os.path.exists(self.session_file):
+                try:
+                    with open(self.session_file, 'r') as f:
+                        storage_state = json.load(f)
+                    logger.info("✅ Loaded existing session state")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to load session state: {e}")
+            
+            # Create context dengan atau tanpa session
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 ignore_https_errors=True,
                 java_script_enabled=True,
-                bypass_csp=True
+                bypass_csp=True,
+                storage_state=storage_state
             )
             
             # Create page
@@ -500,12 +512,24 @@ class TeraboxPlaywrightUploader:
             # Enable request interception untuk monitoring
             await self.page.route("**/*", self.route_handler)
             
-            logger.info("✅ Playwright browser setup completed successfully in HEADLESS mode")
+            logger.info("✅ Playwright browser setup completed successfully")
             return True
             
         except Exception as e:
             logger.error(f"❌ Playwright browser setup failed: {e}")
             await self.cleanup_browser()
+            return False
+
+    async def save_session(self):
+        """Save session cookies untuk penggunaan berikutnya"""
+        try:
+            storage_state = await self.context.storage_state()
+            with open(self.session_file, 'w') as f:
+                json.dump(storage_state, f)
+            logger.info("💾 Session saved successfully")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to save session: {e}")
             return False
 
     async def route_handler(self, route):
@@ -627,19 +651,55 @@ class TeraboxPlaywrightUploader:
             logger.error(f"💥 Error finding/filling {description}: {e}")
             return False
 
-    async def login_to_terabox(self) -> bool:
-        """Login ke Terabox menggunakan element yang tepat dari recording"""
+    async def check_if_logged_in(self) -> bool:
+        """Check jika user sudah login dengan mencoba akses halaman upload"""
         try:
-            logger.info("🔐 Attempting to login to Terabox")
+            logger.info("🔍 Checking login status...")
+            
+            # Coba akses halaman upload langsung
+            upload_url = "https://dm.1024tera.com/webmaster/new/share"
+            await self.page.goto(upload_url, wait_until='domcontentloaded', timeout=30000)
+            
+            # Tunggu sebentar untuk melihat redirect atau perubahan
+            await asyncio.sleep(3)
+            
+            current_url = self.page.url
+            logger.info(f"🌐 Current URL after navigation: {current_url}")
+            
+            # Jika berhasil di halaman upload, berarti sudah login
+            if 'new/share' in current_url:
+                logger.info("✅ Already logged in (detected upload page)")
+                self.current_domain = self.get_current_domain(current_url)
+                return True
+            
+            # Jika di-redirect ke halaman login, berarti belum login
+            if 'login' in current_url or 'index' in current_url:
+                logger.info("❌ Not logged in (redirected to login page)")
+                return False
+            
+            # Default: anggap sudah login jika tidak di-redirect
+            logger.info("✅ Assuming logged in (no redirect detected)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"💥 Error checking login status: {e}")
+            return False
+
+    async def login_to_terabox(self) -> bool:
+        """Login ke Terabox hanya jika diperlukan"""
+        try:
+            # Cek dulu apakah sudah login
+            if await self.check_if_logged_in():
+                logger.info("✅ Already logged in, skipping login process")
+                return True
+            
+            logger.info("🔐 Login required, starting login process...")
             
             # Step 1: Navigate to login page
-            await self.page.goto('https://www.1024tera.com/webmaster/index', wait_until='networkidle')
+            await self.page.goto('https://www.1024tera.com/webmaster/index', wait_until='domcontentloaded')
             await asyncio.sleep(5)
             
-            # Tunggu halaman load sepenuhnya
-            await self.wait_for_network_idle()
-            
-            # Step 2: Click login button dengan element dari recording
+            # Step 2: Click login button
             login_success = await self.find_and_click_element([
                 'div.referral-content span',
                 '//*[@id="app"]/div[1]/div[2]/div[1]/div[2]/span',
@@ -651,7 +711,6 @@ class TeraboxPlaywrightUploader:
                 return False
             
             await asyncio.sleep(3)
-            await self.wait_for_network_idle()
             
             # Step 3: Click email login method
             email_login_success = await self.find_and_click_element([
@@ -664,7 +723,6 @@ class TeraboxPlaywrightUploader:
                 return False
             
             await asyncio.sleep(3)
-            await self.wait_for_network_idle()
             
             # Step 4: Fill email field
             email_fill_success = await self.find_and_fill_element([
@@ -705,12 +763,11 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Failed to click login submit button")
                 return False
             
-            # Wait for login process dan navigation
+            # Wait for login process
             logger.info("⏳ Waiting for login process...")
             await asyncio.sleep(10)
-            await self.wait_for_network_idle()
             
-            # Verifikasi login berhasil dan simpan domain
+            # Verifikasi login berhasil
             current_url = self.page.url
             logger.info(f"🌐 Current URL after login: {current_url}")
             
@@ -718,12 +775,16 @@ class TeraboxPlaywrightUploader:
             self.current_domain = self.get_current_domain(current_url)
             logger.info(f"💾 Saved domain for navigation: {self.current_domain}")
             
-            if 'webmaster/index' in current_url or 'webmaster/new/share' in current_url or 'webmaster/new/home' in current_url:
+            # Save session setelah login berhasil
+            await self.save_session()
+            logger.info("💾 Session saved after successful login")
+            
+            if any(x in current_url for x in ['webmaster/index', 'webmaster/new/share', 'webmaster/new/home']):
                 logger.info("✅ Login successful!")
                 return True
             else:
                 logger.warning(f"⚠️ Unexpected URL after login: {current_url}")
-                # Coba lanjutkan anyway - mungkin sudah login
+                # Coba lanjutkan anyway
                 return True
                 
         except Exception as e:
@@ -736,56 +797,60 @@ class TeraboxPlaywrightUploader:
             return False
 
     async def navigate_to_upload_page(self) -> bool:
-        """Navigate ke halaman upload dengan domain yang sesuai"""
+        """Navigate ke halaman upload dengan approach yang lebih robust"""
         try:
             logger.info("🧭 Navigating to upload page...")
             
-            # Gunakan domain dari sesi login, atau fallback ke dm.1024tera.com
-            if self.current_domain:
-                upload_url = f"https://{self.current_domain}/webmaster/new/share"
-            else:
-                upload_url = "https://dm.1024tera.com/webmaster/new/share"
-                logger.warning("⚠️ Using fallback domain: dm.1024tera.com")
+            # Gunakan domain yang diketahui bekerja
+            upload_url = "https://dm.1024tera.com/webmaster/new/share"
+            logger.info(f"🌐 Direct navigation to: {upload_url}")
             
-            logger.info(f"🌐 Attempting navigation to: {upload_url}")
-            
-            # Coba navigasi dengan timeout yang lebih lama
-            await self.page.goto(upload_url, wait_until='networkidle', timeout=60000)
-            await asyncio.sleep(5)
-            await self.wait_for_network_idle()
-            
-            # Check jika sudah di halaman upload
-            current_url = self.page.url
-            logger.info(f"🌐 Current URL after navigation: {current_url}")
-            
-            if 'new/share' in current_url:
-                logger.info("✅ Successfully navigated to upload page")
-                return True
-            else:
-                logger.warning(f"⚠️ Not on upload page, current URL: {current_url}")
+            # Coba navigasi dengan approach yang berbeda
+            try:
+                # Approach 1: Direct navigation dengan timeout lebih pendek
+                await self.page.goto(upload_url, wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(3)
                 
-                # Coba alternative approach: gunakan domain dari URL saat ini
-                current_domain = self.get_current_domain(current_url)
-                alternative_url = f"https://{current_domain}/webmaster/new/share"
-                logger.info(f"🔄 Trying alternative URL: {alternative_url}")
+                current_url = self.page.url
+                logger.info(f"🌐 Current URL after navigation: {current_url}")
                 
-                await self.page.goto(alternative_url, wait_until='networkidle', timeout=60000)
-                await asyncio.sleep(5)
-                
-                return 'new/share' in self.page.url
+                # Check jika sudah di halaman upload
+                if 'new/share' in current_url:
+                    logger.info("✅ Successfully navigated to upload page")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Not on upload page, current URL: {current_url}")
+                    
+                    # Approach 2: Coba dengan networkidle
+                    logger.info("🔄 Retrying with networkidle...")
+                    await self.page.goto(upload_url, wait_until='networkidle', timeout=30000)
+                    await asyncio.sleep(3)
+                    
+                    current_url = self.page.url
+                    if 'new/share' in current_url:
+                        logger.info("✅ Successfully navigated to upload page (retry)")
+                        return True
+                    
+                    # Approach 3: Coba reload page
+                    logger.info("🔄 Trying page reload...")
+                    await self.page.reload(wait_until='domcontentloaded')
+                    await asyncio.sleep(3)
+                    
+                    current_url = self.page.url
+                    if 'new/share' in current_url:
+                        logger.info("✅ Successfully navigated after reload")
+                        return True
+                    
+                    logger.error("❌ All navigation attempts failed")
+                    return False
+                    
+            except Exception as nav_error:
+                logger.error(f"❌ Navigation error: {nav_error}")
+                return False
                 
         except Exception as e:
-            logger.error(f"💥 Navigation error: {e}")
-            
-            # Fallback ke domain default
-            try:
-                logger.info("🔄 Trying fallback to default domain...")
-                await self.page.goto("https://dm.1024tera.com/webmaster/new/share", wait_until='networkidle', timeout=60000)
-                await asyncio.sleep(5)
-                return 'new/share' in self.page.url
-            except Exception as fallback_error:
-                logger.error(f"💥 Fallback navigation also failed: {fallback_error}")
-                return False
+            logger.error(f"💥 Navigation process error: {e}")
+            return False
 
     async def upload_files(self, folder_path: Path) -> List[str]:
         """Upload files menggunakan element yang tepat dari recording"""
@@ -856,7 +921,6 @@ class TeraboxPlaywrightUploader:
             # Wait for file upload to complete
             logger.info("⏳ Waiting for file upload...")
             await asyncio.sleep(10)
-            await self.wait_for_network_idle()
             
             # Step 3: Click Generate Link
             generate_success = await self.find_and_click_element([
@@ -873,7 +937,6 @@ class TeraboxPlaywrightUploader:
             # Wait for link generation
             logger.info("⏳ Waiting for link generation...")
             await asyncio.sleep(15)
-            await self.wait_for_network_idle()
             
             # Step 4: Try to copy link
             copy_success = await self.find_and_click_element([
@@ -948,15 +1011,16 @@ class TeraboxPlaywrightUploader:
             return []
 
     async def upload_folder_via_playwright(self, folder_path: Path) -> List[str]:
-        """Main method untuk upload folder menggunakan Playwright"""
+        """Main method untuk upload folder menggunakan Playwright dengan session persistence"""
         try:
-            if not await self.setup_browser():
+            # Setup browser dengan session
+            if not await self.setup_browser(use_session=True):
                 logger.error("❌ Browser setup failed, cannot proceed with upload")
                 return []
 
             logger.info(f"🚀 Starting Playwright upload for folder: {folder_path}")
             
-            # Step 1: Login
+            # Step 1: Check login status dan login jika diperlukan
             if not await self.login_to_terabox():
                 logger.error("❌ Login failed, cannot proceed with upload")
                 return []
@@ -1005,25 +1069,22 @@ class TeraboxPlaywrightUploader:
             logger.warning(f"⚠️ Error closing browser: {e}")
 
     def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
-        """Generate enhanced manual instructions dengan domain yang sesuai"""
+        """Generate enhanced manual instructions"""
         file_count = len(list(folder_path.rglob('*')))
-        
-        # Gunakan domain yang tersimpan atau fallback
-        domain = self.current_domain if self.current_domain else "dm.1024tera.com"
         
         instructions = f"""
 📋 **INSTRUKSI UPLOAD MANUAL TERABOX - Job #{job_number}**
 
 🎯 **Langkah-langkah Upload**:
 
-1. **Buka Website**: https://{domain}/webmaster/index
+1. **Buka Website**: https://dm.1024tera.com/webmaster/index
 
 2. **Login**:
    - Email: {self.terabox_email}
    - Password: [tersembunyi]
 
 3. **Navigasi ke Upload**:
-   - Buka: https://{domain}/webmaster/new/share
+   - Buka: https://dm.1024tera.com/webmaster/new/share
 
 4. **Upload File**:
    - Klik area upload atau file input
@@ -1082,7 +1143,7 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🎯 Method: Playwright Headless Automation"
+                f"🎯 Method: Playwright dengan Session Persistence"
             )
 
             # Cek jika credential Terabox tersedia
@@ -1114,7 +1175,7 @@ class UploadManager:
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
-                        f"🎯 Method: Automated Headless Browser"
+                        f"🎯 Method: Automated dengan Session"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -1552,7 +1613,7 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream (Playwright Headless Automation)
+📤 Upload ke Terabox/Doodstream (Playwright dengan Session Persistence)
 ⚙️ Customizable settings
 
 Commands:
@@ -1785,9 +1846,9 @@ Counter Info:
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
 Upload Method:
-🤖 Playwright Automation: Headless browser otomatis
-🌐 URL: https://www.1024tera.com/webmaster/index
-🎯 Technology: Playwright dengan Chromium Headless
+🤖 Playwright Automation: Headless browser dengan Session Persistence
+🌐 URL: https://dm.1024tera.com/webmaster/new/share
+🎯 Technology: Playwright dengan Chromium Headless + Session Cookies
         """
         
         await update.message.reply_text(status_text)
@@ -1805,6 +1866,9 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         terabox_email = os.getenv('TERABOX_EMAIL')
         terabox_password = os.getenv('TERABOX_PASSWORD')
         
+        # Cek session file
+        session_exists = os.path.exists('terabox_session.json')
+        
         debug_text = f"""
 🐛 Debug Information
 
@@ -1820,10 +1884,11 @@ Bot Status:
 
 Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
-🤖 Upload Method: Playwright Headless Automation
+🤖 Upload Method: Playwright dengan Session Persistence
 📧 Terabox Email: {'✅ Set' if terabox_email else '❌ Not Set'}
 🔑 Terabox Password: {'✅ Set' if terabox_password else '❌ Not Set'}
-🌐 Target URL: https://www.1024tera.com/webmaster/index
+💾 Session File: {'✅ Exists' if session_exists else '❌ Not Found'}
+🌐 Target URL: https://dm.1024tera.com/webmaster/new/share
         """
         
         await update.message.reply_text(debug_text)
@@ -2004,7 +2069,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Playwright Headless Automation...")
+    logger.info("🚀 Starting Mega Downloader Bot dengan Playwright Session Persistence...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -2030,6 +2095,13 @@ def main():
         logger.warning("⚠️ Terabox credentials not found! Please set TERABOX_EMAIL and TERABOX_PASSWORD environment variables")
     else:
         logger.info("✅ Terabox credentials found")
+    
+    # Check session file
+    session_exists = os.path.exists('terabox_session.json')
+    if session_exists:
+        logger.info("✅ Terabox session file found - will use existing session")
+    else:
+        logger.info("ℹ️ No Terabox session file found - will create new session on first login")
     
     # Install required packages untuk Playwright
     try:
@@ -2065,7 +2137,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan Playwright headless automation!")
+    logger.info("✅ Bot started successfully dengan Playwright session persistence!")
     application.run_polling()
 
 if __name__ == '__main__':
