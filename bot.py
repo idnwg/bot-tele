@@ -439,15 +439,15 @@ class TeraboxPlaywrightUploader:
         logger.info("🌐 TeraboxPlaywrightUploader initialized dengan login automation")
 
     async def setup_browser(self):
-        """Setup Playwright browser dengan configurasi yang optimal"""
+        """Setup Playwright browser dengan configurasi headless"""
         try:
-            logger.info("🔄 Setting up Playwright browser...")
+            logger.info("🔄 Setting up Playwright browser in HEADLESS mode...")
             
             self.playwright = await async_playwright().start()
             
-            # Launch browser dengan options
+            # Launch browser dengan headless mode
             self.browser = await self.playwright.chromium.launch(
-                headless=False,  # Set True untuk production
+                headless=True,  # HEADLESS MODE untuk server
                 args=[
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
@@ -459,14 +459,25 @@ class TeraboxPlaywrightUploader:
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
                     '--disable-renderer-backgrounding',
+                    '--disable-extensions',
+                    '--disable-plugins',
+                    '--disable-translate',
+                    '--disable-sync',
+                    '--metrics-recording-only',
+                    '--mute-audio',
+                    '--no-first-run',
+                    '--disable-default-apps',
+                    '--disable-component-extensions-with-background-pages',
                 ]
             )
             
             # Create context dengan viewport dan user agent
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                ignore_https_errors=True
+                user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                ignore_https_errors=True,
+                java_script_enabled=True,
+                bypass_csp=True
             )
             
             # Create page
@@ -475,7 +486,10 @@ class TeraboxPlaywrightUploader:
             # Set default timeout
             self.page.set_default_timeout(self.timeout)
             
-            logger.info("✅ Playwright browser setup completed successfully")
+            # Enable request interception untuk monitoring
+            await self.page.route("**/*", self.route_handler)
+            
+            logger.info("✅ Playwright browser setup completed successfully in HEADLESS mode")
             return True
             
         except Exception as e:
@@ -483,42 +497,60 @@ class TeraboxPlaywrightUploader:
             await self.cleanup_browser()
             return False
 
-    async def find_and_click_element(self, selectors: List[str], description: str, offset_x: int = 0, offset_y: int = 0, count: int = 1) -> bool:
+    async def route_handler(self, route):
+        """Handler untuk monitoring requests"""
+        try:
+            # Continue semua requests tanpa modifikasi
+            await route.continue_()
+        except Exception as e:
+            logger.debug(f"Route handler error: {e}")
+
+    async def wait_for_network_idle(self, timeout: int = 30000):
+        """Wait for network to be idle"""
+        try:
+            await self.page.wait_for_load_state('networkidle', timeout=timeout)
+        except Exception as e:
+            logger.debug(f"Network idle wait timeout: {e}")
+
+    async def find_and_click_element(self, selectors: List[str], description: str, timeout: int = None) -> bool:
         """Find and click element dengan multiple selector strategies"""
+        if timeout is None:
+            timeout = self.timeout
+            
         try:
             for selector in selectors:
                 try:
+                    logger.debug(f"🔍 Trying selector: {selector} untuk {description}")
+                    
                     # Handle different selector types
                     if selector.startswith('//'):
                         # XPath selector
-                        element = await self.page.wait_for_selector(f"xpath={selector}", timeout=self.timeout)
+                        element = await self.page.wait_for_selector(f"xpath={selector}", timeout=timeout)
                     elif selector.startswith('::-p-text('):
                         # Text-based selector
                         text = selector.replace('::-p-text(', '').rstrip(')')
-                        element = await self.page.wait_for_selector(f"text={text}", timeout=self.timeout)
+                        element = await self.page.wait_for_selector(f"text={text}", timeout=timeout)
+                    elif selector.startswith('::-p-aria('):
+                        # ARIA selector
+                        aria_label = selector.replace('::-p-aria(', '').rstrip(')')
+                        element = await self.page.wait_for_selector(f'[aria-label="{aria_label}"]', timeout=timeout)
                     else:
                         # CSS selector
-                        element = await self.page.wait_for_selector(selector, timeout=self.timeout)
+                        element = await self.page.wait_for_selector(selector, timeout=timeout)
                     
                     if element:
                         logger.info(f"✅ Found {description} dengan selector: {selector}")
                         
-                        # Click dengan offset jika diperlukan
-                        if offset_x != 0 or offset_y != 0:
-                            box = await element.bounding_box()
-                            if box:
-                                await self.page.mouse.click(box['x'] + offset_x, box['y'] + offset_y)
-                            else:
-                                await element.click()
-                        else:
-                            await element.click()
+                        # Scroll element into view
+                        await element.scroll_into_view_if_needed()
                         
-                        # Multiple clicks jika diperlukan
-                        for _ in range(count - 1):
-                            await asyncio.sleep(0.5)
-                            await element.click()
+                        # Wait for element to be stable
+                        await asyncio.sleep(1)
                         
-                        logger.info(f"✅ Clicked {description} dengan offset ({offset_x}, {offset_y})")
+                        # Click element
+                        await element.click(delay=100)  # 100ms delay untuk realism
+                        
+                        logger.info(f"✅ Clicked {description}")
                         await asyncio.sleep(2)
                         return True
                         
@@ -533,22 +565,36 @@ class TeraboxPlaywrightUploader:
             logger.error(f"💥 Error finding/clicking {description}: {e}")
             return False
 
-    async def find_and_fill_element(self, selectors: List[str], description: str, text: str) -> bool:
+    async def find_and_fill_element(self, selectors: List[str], description: str, text: str, timeout: int = None) -> bool:
         """Find and fill element dengan multiple selector strategies"""
+        if timeout is None:
+            timeout = self.timeout
+            
         try:
             for selector in selectors:
                 try:
+                    logger.debug(f"🔍 Trying selector: {selector} untuk {description}")
+                    
                     # Handle different selector types
                     if selector.startswith('//'):
-                        element = await self.page.wait_for_selector(f"xpath={selector}", timeout=self.timeout)
+                        element = await self.page.wait_for_selector(f"xpath={selector}", timeout=timeout)
                     elif selector.startswith('::-p-text('):
                         text_sel = selector.replace('::-p-text(', '').rstrip(')')
-                        element = await self.page.wait_for_selector(f"text={text_sel}", timeout=self.timeout)
+                        element = await self.page.wait_for_selector(f"text={text_sel}", timeout=timeout)
+                    elif selector.startswith('::-p-aria('):
+                        aria_label = selector.replace('::-p-aria(', '').rstrip(')')
+                        element = await self.page.wait_for_selector(f'[aria-label="{aria_label}"]', timeout=timeout)
                     else:
-                        element = await self.page.wait_for_selector(selector, timeout=self.timeout)
+                        element = await self.page.wait_for_selector(selector, timeout=timeout)
                     
                     if element:
                         logger.info(f"✅ Found {description} dengan selector: {selector}")
+                        
+                        # Scroll element into view
+                        await element.scroll_into_view_if_needed()
+                        
+                        # Wait for element to be stable
+                        await asyncio.sleep(1)
                         
                         # Clear dan fill field
                         await element.click(click_count=3)  # Triple click untuk select all
@@ -579,82 +625,60 @@ class TeraboxPlaywrightUploader:
             await self.page.goto('https://www.1024tera.com/webmaster/index', wait_until='networkidle')
             await asyncio.sleep(5)
             
+            # Tunggu halaman load sepenuhnya
+            await self.wait_for_network_idle()
+            
             # Step 2: Click login button dengan element dari recording
             login_success = await self.find_and_click_element([
                 'div.referral-content span',
                 '//*[@id="app"]/div[1]/div[2]/div[1]/div[2]/span',
                 '::-p-text(Log in)'
-            ], "login button", offset_x=57.7, offset_y=2.56)
+            ], "login button")
             
             if not login_success:
+                logger.error("❌ Failed to click login button")
                 return False
             
             await asyncio.sleep(3)
+            await self.wait_for_network_idle()
             
             # Step 3: Click email login method
             email_login_success = await self.find_and_click_element([
                 'div.other-item > div:nth-of-type(2)',
                 '//*[@id="app"]/div[1]/div[1]/div[2]/div[2]/div/div[2]/div/div[4]/div[3]/div[2]'
-            ], "email login method", offset_x=42.5, offset_y=24.6)
+            ], "email login method")
             
             if not email_login_success:
+                logger.error("❌ Failed to click email login method")
                 return False
             
             await asyncio.sleep(3)
+            await self.wait_for_network_idle()
             
-            # Step 4: Click dan fill email field
-            email_click_success = await self.find_and_click_element([
-                '[aria-label="Enter your email"]',
-                '#email-input',
-                '//*[@id="email-input"]'
-            ], "email field", offset_x=65.5, offset_y=11.4)
-            
-            if not email_click_success:
-                return False
-            
-            await asyncio.sleep(1)
-            
-            # Double click email field (seperti di recording)
-            await self.find_and_click_element([
-                '[aria-label="Enter your email"]',
-                '#email-input',
-                '//*[@id="email-input"]'
-            ], "email field double click", offset_x=65.5, offset_y=13.4)
-            
-            await asyncio.sleep(1)
-            
-            # Fill email
+            # Step 4: Fill email field
             email_fill_success = await self.find_and_fill_element([
                 '[aria-label="Enter your email"]',
                 '#email-input',
-                '//*[@id="email-input"]'
+                '//*[@id="email-input"]',
+                'input[type="email"]'
             ], "email field", self.terabox_email)
             
             if not email_fill_success:
+                logger.error("❌ Failed to fill email field")
                 return False
             
             await asyncio.sleep(2)
             
-            # Step 5: Click dan fill password field
-            password_click_success = await self.find_and_click_element([
-                '[aria-label="Enter the password."]',
-                '#pwd-input',
-                '//*[@id="pwd-input"]'
-            ], "password field", offset_x=69.5, offset_y=27.4)
-            
-            if not password_click_success:
-                return False
-            
-            await asyncio.sleep(1)
-            
-            # Fill password
+            # Step 5: Fill password field
             password_fill_success = await self.find_and_fill_element([
                 '[aria-label="Enter the password."]',
                 '#pwd-input',
-                '//*[@id="pwd-input"]'
+                '//*[@id="pwd-input"]',
+                'input[type="password"]'
             ], "password field", self.terabox_password)
             
             if not password_fill_success:
+                logger.error("❌ Failed to fill password field")
                 return False
             
             await asyncio.sleep(2)
@@ -662,15 +686,18 @@ class TeraboxPlaywrightUploader:
             # Step 6: Click login submit button
             login_submit_success = await self.find_and_click_element([
                 'div.btn-class-login',
-                '//*[@id="app"]/div[1]/div[1]/div[2]/div[2]/div/div[2]/div/div[3]/div/div[5]'
-            ], "login submit button", offset_x=178.5, offset_y=23)
+                '//*[@id="app"]/div[1]/div[1]/div[2]/div[2]/div/div[2]/div/div[3]/div/div[5]',
+                'button[type="submit"]'
+            ], "login submit button")
             
             if not login_submit_success:
+                logger.error("❌ Failed to click login submit button")
                 return False
             
             # Wait for login process dan navigation
             logger.info("⏳ Waiting for login process...")
             await asyncio.sleep(10)
+            await self.wait_for_network_idle()
             
             # Verifikasi login berhasil
             try:
@@ -681,7 +708,7 @@ class TeraboxPlaywrightUploader:
                     return True
                 else:
                     logger.warning(f"⚠️ Unexpected URL after login: {current_url}")
-                    # Coba lanjutkan anyway
+                    # Coba lanjutkan anyway - mungkin sudah login
                     return True
             except Exception as e:
                 logger.warning(f"⚠️ Login verification warning: {e}")
@@ -692,54 +719,36 @@ class TeraboxPlaywrightUploader:
             logger.error(f"💥 Login error: {e}")
             try:
                 await self.page.screenshot(path="login_error.png")
+                logger.info("📸 Saved login error screenshot")
             except:
                 pass
             return False
 
     async def navigate_to_upload_page(self) -> bool:
-        """Navigate ke halaman upload menggunakan element dari recording"""
+        """Navigate ke halaman upload"""
         try:
             logger.info("🧭 Navigating to upload page...")
             
-            # Step 1: Click guide container tab (seperti di recording)
-            guide_success = await self.find_and_click_element([
-                'div.guide-container > div.tab-item div',
-                '//*[@id="app"]/div[1]/div[2]/div[1]/div/div[2]/div[1]/span/div'
-            ], "guide tab", offset_x=18, offset_y=14)
+            # Coba navigasi langsung ke upload page
+            await self.page.goto('https://www.1024tera.com/webmaster/new/share', wait_until='networkidle')
+            await asyncio.sleep(5)
+            await self.wait_for_network_idle()
             
-            if not guide_success:
-                logger.warning("⚠️ Could not click guide tab, trying direct navigation")
-                # Coba navigasi langsung ke upload page
+            # Check jika sudah di halaman upload
+            current_url = self.page.url
+            if 'new/share' in current_url:
+                logger.info("✅ Successfully navigated to upload page")
+                return True
+            else:
+                logger.warning(f"⚠️ Not on upload page, current URL: {current_url}")
+                # Coba alternative URL
                 await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
                 await asyncio.sleep(5)
-                return True
-            
-            await asyncio.sleep(3)
-            
-            # Step 2: Click source array item (Local File)
-            source_success = await self.find_and_click_element([
-                'div.source-arr > div:nth-of-type(1) div:nth-of-type(2)',
-                '//*[@id="upload-container"]/div/div[2]/div[1]/div/div[2]'
-            ], "source array item", offset_x=56, offset_y=19)
-            
-            if not source_success:
-                logger.warning("⚠️ Could not click source array, trying direct upload page")
-                await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
-                await asyncio.sleep(5)
-                return True
-            
-            await asyncio.sleep(3)
-            return True
-            
+                return 'new/share' in self.page.url
+                
         except Exception as e:
             logger.error(f"💥 Navigation error: {e}")
-            # Fallback ke direct navigation
-            try:
-                await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
-                await asyncio.sleep(5)
-                return True
-            except:
-                return False
+            return False
 
     async def upload_files(self, folder_path: Path) -> List[str]:
         """Upload files menggunakan element yang tepat dari recording"""
@@ -756,11 +765,13 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ No files found to upload")
                 return []
             
-            # Upload files dalam batch kecil untuk testing
-            batch_files = all_files[:3]  # Batasi 3 file dulu untuk testing
+            # Upload files dalam batch
+            batch_files = all_files[:5]  # Batasi 5 file untuk testing
             
             for i, file_path in enumerate(batch_files, 1):
-                if not await self.upload_single_file(file_path, i, total_files):
+                logger.info(f"📤 Uploading file {i}/{len(batch_files)}: {file_path.name}")
+                
+                if not await self.upload_single_file(file_path, i, len(batch_files)):
                     logger.error(f"❌ Failed to upload file: {file_path.name}")
                 else:
                     logger.info(f"✅ Successfully uploaded: {file_path.name}")
@@ -773,15 +784,17 @@ class TeraboxPlaywrightUploader:
             return []
 
     async def upload_single_file(self, file_path: Path, current: int, total: int) -> bool:
-        """Upload single file menggunakan element dari recording"""
+        """Upload single file"""
         try:
             logger.info(f"📤 Uploading file {current}/{total}: {file_path.name}")
             
-            # Step 1: Click input file element
+            # Step 1: Wait for file input element
             file_input_success = await self.find_and_click_element([
-                'input:nth-of-type(2)',
-                '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[1]/div[1]/div/input[2]'
-            ], "file input", offset_x=0, offset_y=0)
+                'input[type="file"]',
+                '//input[@type="file"]',
+                '.upload-input',
+                '#file-input'
+            ], "file input", timeout=60000)
             
             if not file_input_success:
                 logger.error("❌ Could not find file input element")
@@ -789,10 +802,10 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(2)
             
-            # Step 2: Handle file picker - Playwright memiliki cara yang lebih baik
+            # Step 2: Handle file upload
             try:
                 # Tunggu file input element
-                file_input = await self.page.wait_for_selector('input[type="file"]', timeout=self.timeout)
+                file_input = await self.page.wait_for_selector('input[type="file"]', timeout=60000)
                 if file_input:
                     await file_input.set_input_files(str(file_path.absolute()))
                     logger.info(f"✅ File sent to input: {file_path.name}")
@@ -803,14 +816,18 @@ class TeraboxPlaywrightUploader:
                 logger.error(f"❌ Error setting file input: {e}")
                 return False
             
-            await asyncio.sleep(5)  # Wait for file upload
+            # Wait for file upload to complete
+            logger.info("⏳ Waiting for file upload...")
+            await asyncio.sleep(10)
+            await self.wait_for_network_idle()
             
             # Step 3: Click Generate Link
             generate_success = await self.find_and_click_element([
                 'div.share-way span',
-                '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[3]/div[1]/div[2]/div[2]/span',
-                '::-p-text(Generate Link)'
-            ], "generate link button", offset_x=31.95, offset_y=3.6)
+                '//*[contains(text(), "Generate Link")]',
+                'button:has-text("Generate Link")',
+                '.generate-link-btn'
+            ], "generate link button", timeout=60000)
             
             if not generate_success:
                 logger.error("❌ Could not click Generate Link")
@@ -818,29 +835,32 @@ class TeraboxPlaywrightUploader:
             
             # Wait for link generation
             logger.info("⏳ Waiting for link generation...")
-            await asyncio.sleep(10)
+            await asyncio.sleep(15)
+            await self.wait_for_network_idle()
             
-            # Step 4: Copy link (multiple clicks seperti di recording)
+            # Step 4: Try to copy link
             copy_success = await self.find_and_click_element([
                 'div.media-item > img:nth-of-type(1)',
-                '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[3]/div/div[4]/img[1]'
-            ], "copy button", offset_x=13, offset_y=12.85, count=3)
+                '//img[@alt="copy"]',
+                '.copy-button',
+                'button:has-text("Copy")'
+            ], "copy button", timeout=30000)
             
             if not copy_success:
                 logger.warning("⚠️ Could not click copy button, but upload might still be successful")
             
-            await asyncio.sleep(3)
-            
-            # Step 5: Close modal (jika ada)
+            # Step 5: Close modal jika ada
             close_success = await self.find_and_click_element([
                 'div.top-header > img',
-                '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[3]/div/div[1]/img'
-            ], "close button", offset_x=3, offset_y=5)
+                '.close-button',
+                'button:has-text("Close")',
+                '//button[contains(@class, "close")]'
+            ], "close button", timeout=10000)
             
             if not close_success:
                 logger.debug("ℹ️ No close button found, continuing...")
             
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
             return True
             
@@ -861,13 +881,15 @@ class TeraboxPlaywrightUploader:
             # Pattern untuk Terabox share links
             patterns = [
                 r'https?://[^\s<>"{}|\\^`]*terabox[^\s<>"{}|\\^`]*',
-                r'https?://[^\s<>"{}|\\^`]*1024tera[^\s<>"{}|\\^`]*'
+                r'https?://[^\s<>"{}|\\^`]*1024tera[^\s<>"{}|\\^`]*',
+                r'https?://www\.terabox\.com/[^\s<>"{}|\\^`]*',
+                r'https?://terabox\.com/[^\s<>"{}|\\^`]*'
             ]
             
             for pattern in patterns:
                 found_links = re.findall(pattern, page_content)
                 # Filter hanya link share yang valid
-                valid_links = [link for link in found_links if any(x in link for x in ['/s/', '/share/', 'download'])]
+                valid_links = [link for link in found_links if any(x in link for x in ['/s/', '/share/', 'download', 'sharing'])]
                 links.extend(valid_links)
             
             # Remove duplicates
@@ -912,6 +934,8 @@ class TeraboxPlaywrightUploader:
             
             if links:
                 logger.info(f"✅ Upload completed! {len(links)} links generated")
+                for i, link in enumerate(links, 1):
+                    logger.info(f"🔗 Link {i}: {link}")
             else:
                 logger.warning("⚠️ Upload completed but no links found")
             
@@ -921,6 +945,7 @@ class TeraboxPlaywrightUploader:
             logger.error(f"💥 Playwright upload error: {e}")
             try:
                 await self.page.screenshot(path=f"error_{int(time.time())}.png")
+                logger.info("📸 Saved error screenshot")
             except:
                 pass
             return []
@@ -943,36 +968,32 @@ class TeraboxPlaywrightUploader:
             logger.warning(f"⚠️ Error closing browser: {e}")
 
     def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
-        """Generate enhanced manual instructions berdasarkan element yang tepat"""
+        """Generate enhanced manual instructions"""
         file_count = len(list(folder_path.rglob('*')))
         
         instructions = f"""
 📋 **INSTRUKSI UPLOAD MANUAL TERABOX - Job #{job_number}**
 
-🎯 **Langkah-langkah Berdasarkan Element Exact dari Recording**:
+🎯 **Langkah-langkah Upload**:
 
 1. **Buka Website**: https://www.1024tera.com/webmaster/index
 
 2. **Login**:
-   - Klik: `div.referral-content span` (teks Log in)
-   - Klik: `div.other-item > div:nth-of-type(2)` (email login)
-   - Input email: `#email-input` ({self.terabox_email})
-   - Input password: `#pwd-input` 
-   - Klik: `div.btn-class-login`
+   - Email: {self.terabox_email}
+   - Password: [tersembunyi]
 
 3. **Navigasi ke Upload**:
-   - Klik: `div.guide-container > div.tab-item div`
-   - Klik: `div.source-arr > div:nth-of-type(1) div:nth-of-type(2)` (Local File)
+   - Buka: https://www.1024tera.com/webmaster/new/share
 
 4. **Upload File**:
-   - Klik: `input:nth-of-type(2)` (file input)
+   - Klik area upload atau file input
    - Pilih file dari: `{folder_path}`
-   - Klik: `div.share-way span` (Generate Link)
+   - Klik "Generate Link"
 
 5. **Copy Link**:
    - Tunggu link generated
-   - Klik: `div.media-item > img:nth-of-type(1)` (copy button) 3x
-   - Klik: `div.top-header > img` (close)
+   - Klik tombol copy
+   - Simpan link yang dihasilkan
 
 📁 **Detail Folder**:
 - Path: `{folder_path}`
@@ -980,14 +1001,14 @@ class TeraboxPlaywrightUploader:
 - Job ID: #{job_number}
 
 🔧 **Jika Automation Gagal**:
-- Pastikan Chrome terinstall di sistem
-- Cek log untuk detail error
+- Pastikan login berhasil manual terlebih dahulu
+- Cek koneksi internet
+- Verifikasi folder berisi file yang valid
 
 💡 **Tips**:
 - Gunakan Chrome browser versi terbaru
 - Matikan pop-up blocker
 - Allow file system permissions
-- Pastikan login berhasil sebelum upload
 """
         return instructions
 
@@ -1005,7 +1026,7 @@ class UploadManager:
         logger.info("📤 UploadManager initialized dengan Playwright uploader")
 
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox menggunakan Playwright automation dengan element yang tepat"""
+        """Upload files to Terabox menggunakan Playwright automation"""
         logger.info(f"🚀 Starting Terabox upload untuk job {job_id}, folder: {folder_path}")
         
         try:
@@ -1021,7 +1042,7 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🎯 Method: Playwright dengan Element Exact dari Recording"
+                f"🎯 Method: Playwright Headless Automation"
             )
 
             # Cek jika credential Terabox tersedia
@@ -1035,16 +1056,16 @@ class UploadManager:
                 )
                 return []
 
-            # Coba automation dengan Playwright menggunakan element yang tepat
+            # Coba automation dengan Playwright
             await self.send_progress_message(
                 update, context, job_id,
-                "🔄 Mencoba login dan upload otomatis dengan element exact..."
+                "🔄 Mencoba login dan upload otomatis dengan Playwright..."
             )
             
             with self.terabox_lock:
                 logger.info("🔒 Acquired Terabox upload lock")
                 
-                # Try Playwright automation dengan element exact dari recording
+                # Try Playwright automation
                 links = await self.terabox_playwright_uploader.upload_folder_via_playwright(folder_path)
                 
                 if links:
@@ -1053,7 +1074,7 @@ class UploadManager:
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
-                        f"🎯 Method: Automated dengan Element Exact"
+                        f"🎯 Method: Automated Headless Browser"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -1068,7 +1089,7 @@ class UploadManager:
                     
                     return links
                 else:
-                    # Fallback ke instruksi manual yang sangat detail
+                    # Fallback ke instruksi manual
                     await self.send_progress_message(
                         update, context, job_id,
                         "⚠️ Upload otomatis tidak berhasil\n"
@@ -1083,7 +1104,7 @@ class UploadManager:
         except Exception as e:
             logger.error(f"💥 Terabox upload error untuk {job_id}: {e}")
             
-            # Berikan instruksi manual dengan element exact
+            # Berikan instruksi manual
             with self._counter_lock:
                 job_number = self._job_counter - 1
             
@@ -1491,7 +1512,7 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream (Playwright Automation dengan Element Exact)
+📤 Upload ke Terabox/Doodstream (Playwright Headless Automation)
 ⚙️ Customizable settings
 
 Commands:
@@ -1724,9 +1745,9 @@ Counter Info:
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
 Upload Method:
-🤖 Playwright Automation: Browser otomatis dengan element exact
+🤖 Playwright Automation: Headless browser otomatis
 🌐 URL: https://www.1024tera.com/webmaster/index
-🎯 Element: Exact dari recording Puppeteer
+🎯 Technology: Playwright dengan Chromium Headless
         """
         
         await update.message.reply_text(status_text)
@@ -1759,11 +1780,10 @@ Bot Status:
 
 Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
-🤖 Upload Method: Playwright dengan Element Exact
+🤖 Upload Method: Playwright Headless Automation
 📧 Terabox Email: {'✅ Set' if terabox_email else '❌ Not Set'}
 🔑 Terabox Password: {'✅ Set' if terabox_password else '❌ Not Set'}
 🌐 Target URL: https://www.1024tera.com/webmaster/index
-🎯 Element Source: Recording Puppeteer dengan offset exact
         """
         
         await update.message.reply_text(debug_text)
@@ -1944,7 +1964,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Playwright Element Exact...")
+    logger.info("🚀 Starting Mega Downloader Bot dengan Playwright Headless Automation...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -2005,7 +2025,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan Playwright element exact automation!")
+    logger.info("✅ Bot started successfully dengan Playwright headless automation!")
     application.run_polling()
 
 if __name__ == '__main__':
