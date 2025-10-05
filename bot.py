@@ -33,6 +33,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.chrome.service import Service
 
 # Load environment variables
 load_dotenv()
@@ -441,23 +442,162 @@ class TeraboxSeleniumUploader:
         self.timeout = 30
         logger.info("🌐 TeraboxSeleniumUploader initialized dengan login automation")
     
+    def find_chrome_binary(self):
+        """Find Chrome binary in common locations"""
+        possible_paths = [
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable', 
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/snap/bin/chromium',
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            'C:/Program Files/Google/Chrome/Application/chrome.exe'
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                logger.info(f"✅ Found Chrome binary at: {path}")
+                return path
+        logger.error("❌ Chrome binary not found in common locations")
+        return None
+
     def setup_driver(self):
-        """Setup Chrome driver untuk automation"""
+        """Setup Chrome driver dengan handling yang lebih baik"""
         try:
             chrome_options = Options()
-            # chrome_options.add_argument('--headless')  # Comment out untuk debugging
+            
+            # Cari Chrome binary
+            chrome_binary = self.find_chrome_binary()
+            if chrome_binary:
+                chrome_options.binary_location = chrome_binary
+                logger.info(f"🔧 Using Chrome binary: {chrome_binary}")
+            else:
+                logger.warning("⚠️ Chrome binary not found, relying on system default")
+            
+            # Opsi untuk stability
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--window-size=1536,311')
             chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
             
-            self.driver = webdriver.Chrome(options=chrome_options)
-            self.wait = WebDriverWait(self.driver, self.timeout)
-            logger.info("✅ Chrome driver setup completed")
-            return True
+            # Additional options untuk stability
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # Comment out headless untuk debugging
+            # chrome_options.add_argument('--headless')
+            
+            # Setup service dengan handling error
+            from selenium.webdriver.chrome.service import Service
+            
+            # Coba beberapa kemungkinan chromedriver paths
+            possible_driver_paths = [
+                '/usr/bin/chromedriver',
+                '/usr/local/bin/chromedriver', 
+                '/snap/bin/chromedriver',
+                'chromedriver'  # Fallback ke system PATH
+            ]
+            
+            service = None
+            for driver_path in possible_driver_paths:
+                try:
+                    if os.path.exists(driver_path):
+                        service = Service(driver_path)
+                        logger.info(f"✅ Using chromedriver at: {driver_path}")
+                        break
+                except Exception as e:
+                    continue
+            
+            if service is None:
+                # Fallback ke Service tanpa path specific
+                service = Service()
+                logger.info("🔧 Using default chromedriver from system PATH")
+            
+            # Setup driver dengan retry mechanism
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.driver = webdriver.Chrome(service=service, options=chrome_options)
+                    self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    
+                    self.wait = WebDriverWait(self.driver, self.timeout)
+                    logger.info("✅ Chrome driver setup completed successfully")
+                    return True
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Chrome driver setup attempt {attempt + 1} failed: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    else:
+                        raise e
+                        
         except Exception as e:
-            logger.error(f"❌ Failed to setup Chrome driver: {e}")
+            logger.error(f"❌ Failed to setup Chrome driver after all attempts: {e}")
+            
+            # Fallback: coba tanpa service specification
+            try:
+                logger.info("🔄 Trying fallback driver setup...")
+                self.driver = webdriver.Chrome(options=chrome_options)
+                self.wait = WebDriverWait(self.driver, self.timeout)
+                logger.info("✅ Fallback Chrome driver setup successful")
+                return True
+            except Exception as fallback_error:
+                logger.error(f"❌ Fallback driver setup also failed: {fallback_error}")
+                return False
+
+    def install_chrome_dependencies(self):
+        """Install Chrome dan dependencies yang diperlukan"""
+        try:
+            logger.info("🔧 Checking and installing Chrome dependencies...")
+            
+            # Check jika Chrome sudah terinstall
+            if self.find_chrome_binary():
+                logger.info("✅ Chrome is already installed")
+                return True
+            
+            # Install Chrome di Ubuntu/Debian
+            import platform
+            system = platform.system().lower()
+            
+            if system == 'linux':
+                # Update package list
+                subprocess.run(['sudo', 'apt', 'update'], check=True, capture_output=True)
+                
+                # Install Chrome
+                chrome_install_commands = [
+                    ['sudo', 'apt', 'install', '-y', 'wget'],
+                    ['wget', 'https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb'],
+                    ['sudo', 'apt', 'install', '-y', './google-chrome-stable_current_amd64.deb'],
+                    ['rm', 'google-chrome-stable_current_amd64.deb']
+                ]
+                
+                for cmd in chrome_install_commands:
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        logger.warning(f"⚠️ Command failed: {' '.join(cmd)}")
+                
+                # Install chromedriver
+                chromedriver_commands = [
+                    ['sudo', 'apt', 'install', '-y', 'chromium-chromedriver'],
+                    ['sudo', 'ln', '-sf', '/usr/lib/chromium-browser/chromedriver', '/usr/bin/chromedriver']
+                ]
+                
+                for cmd in chromedriver_commands:
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        logger.warning(f"⚠️ Command failed: {' '.join(cmd)}")
+                
+                logger.info("✅ Chrome dependencies installation attempted")
+                return self.find_chrome_binary() is not None
+                
+            else:
+                logger.warning(f"⚠️ Automatic Chrome installation not supported for {system}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Chrome dependencies installation failed: {e}")
             return False
 
     def find_and_click_element(self, selectors: List[str], description: str, offset_x: int = 0, offset_y: int = 0, count: int = 1) -> bool:
@@ -765,13 +905,13 @@ class TeraboxSeleniumUploader:
             
             # Step 2: Handle file picker - kita perlu menggunakan JavaScript untuk set file input
             try:
-                file_input = self.driver.find_element(By.CSS_SELECTOR, 'input:nth-of-type(2)')
-                # Pastikan element adalah file input
-                if file_input.get_attribute('type') == 'file':
+                file_inputs = self.driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+                if file_inputs:
+                    file_input = file_inputs[0]
                     file_input.send_keys(str(file_path.absolute()))
                     logger.info(f"✅ File sent to input: {file_path.name}")
                 else:
-                    logger.error("❌ Element is not a file input")
+                    logger.error("❌ No file input element found")
                     return False
             except Exception as e:
                 logger.error(f"❌ Error setting file input: {e}")
@@ -796,7 +936,6 @@ class TeraboxSeleniumUploader:
             
             # Step 4: Copy link (multiple clicks seperti di recording)
             copy_success = self.find_and_click_element([
-                '::-p-aria(Copy)',
                 'div.media-item > img:nth-of-type(1)',
                 '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[3]/div/div[4]/img[1]'
             ], "copy button", offset_x=13, offset_y=12.85, count=3)
@@ -866,8 +1005,17 @@ class TeraboxSeleniumUploader:
     def upload_folder_via_selenium(self, folder_path: Path) -> List[str]:
         """Main method untuk upload folder menggunakan Selenium dengan element exact"""
         try:
+            # Coba install dependencies jika driver setup gagal
             if not self.setup_driver():
-                return []
+                logger.warning("🔄 Initial driver setup failed, trying to install dependencies...")
+                if self.install_chrome_dependencies():
+                    logger.info("🔄 Retrying driver setup after dependency installation...")
+                    if not self.setup_driver():
+                        logger.error("❌ Driver setup failed even after dependency installation")
+                        return []
+                else:
+                    logger.error("❌ Dependency installation failed")
+                    return []
 
             logger.info(f"🚀 Starting Selenium upload for folder: {folder_path}")
             
@@ -940,21 +1088,13 @@ class TeraboxSeleniumUploader:
 - Total Files: {file_count} files
 - Job ID: #{job_number}
 
-🎯 **Element Exact yang Digunakan**:
-- Login: `div.referral-content span`
-- Email Login: `div.other-item > div:nth-of-type(2)`
-- Email Input: `#email-input`
-- Password Input: `#pwd-input`
-- Login Submit: `div.btn-class-login`
-- Guide Tab: `div.guide-container > div.tab-item div`
-- Local File: `div.source-arr > div:nth-of-type(1) div:nth-of-type(2)`
-- File Input: `input:nth-of-type(2)`
-- Generate Link: `div.share-way span`
-- Copy Button: `div.media-item > img:nth-of-type(1)`
-- Close Button: `div.top-header > img`
+🔧 **Jika Automation Gagal**:
+- Pastikan Chrome terinstall di sistem
+- Pastikan chromedriver kompatibel dengan versi Chrome
+- Cek log untuk detail error
 
 💡 **Tips**:
-- Gunakan Chrome browser
+- Gunakan Chrome browser versi terbaru
 - Matikan pop-up blocker
 - Allow file system permissions
 - Pastikan login berhasil sebelum upload
