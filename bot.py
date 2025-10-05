@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
+import tempfile
 from datetime import datetime
 from queue import Queue
 from typing import Dict, List, Tuple, Optional
@@ -25,18 +26,8 @@ from dotenv import load_dotenv
 import requests
 import aiohttp
 
-# Selenium imports untuk automation Terabox
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service as ChromeService
+# Playwright imports untuk automation Terabox
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 
 # Load environment variables
 load_dotenv()
@@ -436,135 +427,99 @@ class FileManager:
             logger.error(f"💥 Error in auto_rename: {e}")
             return {'renamed': 0, 'total': 0}
 
-class TeraboxSeleniumUploader:
+class TeraboxPlaywrightUploader:
     def __init__(self):
-        self.driver = None
-        self.wait = None
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
         self.terabox_email = os.getenv('TERABOX_EMAIL')
         self.terabox_password = os.getenv('TERABOX_PASSWORD')
-        self.timeout = 30
-        self.user_data_dir = None  # Untuk cleanup nanti
-        logger.info("🌐 TeraboxSeleniumUploader initialized dengan login automation")
-    
-    def find_chrome_binary(self):
-        """Find Chrome binary in common locations"""
-        possible_paths = [
-            '/usr/bin/google-chrome',
-            '/usr/bin/google-chrome-stable', 
-            '/usr/bin/chromium-browser',
-            '/usr/bin/chromium',
-            '/snap/bin/chromium',
-            '/snap/bin/google-chrome',
-            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            'C:/Program Files/Google/Chrome/Application/chrome.exe'
-        ]
-        for path in possible_paths:
-            if os.path.exists(path):
-                logger.info(f"✅ Found Chrome binary at: {path}")
-                return path
-        logger.error("❌ Chrome binary not found in common locations")
-        return None
+        self.timeout = 30000  # 30 seconds in milliseconds
+        logger.info("🌐 TeraboxPlaywrightUploader initialized dengan login automation")
 
-    def setup_driver(self):
-        """Setup Chrome driver dengan solusi VPS yang terbukti"""
+    async def setup_browser(self):
+        """Setup Playwright browser dengan configurasi yang optimal"""
         try:
-            # --- Chrome Options ---
-            options = Options()
-
-            # Pastikan folder untuk profil Chrome disiapkan secara manual
-            profile_root = "/root/.config/chrome_profiles"
-            os.makedirs(profile_root, exist_ok=True)
-
-            # Buat subfolder unik berdasarkan UUID (jadi tetap unik antar sesi)
-            self.user_data_dir = os.path.join(profile_root, f"profile_{uuid.uuid4().hex}")
-            os.makedirs(self.user_data_dir, exist_ok=True)
-            logger.info(f"🔧 Using user-data-dir: {self.user_data_dir}")
-
-            options.add_argument(f"--user-data-dir={self.user_data_dir}")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--disable-software-rasterizer")
-            options.add_argument("--remote-debugging-port=0")  # Random port untuk menghindari konflik
-            options.add_argument("--window-size=1536,835")
-            options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            logger.info("🔄 Setting up Playwright browser...")
             
-            # Additional options untuk stability
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            options.add_experimental_option('useAutomationExtension', False)
+            self.playwright = await async_playwright().start()
             
-            # Comment out headless untuk debugging
-            # options.add_argument("--headless=new")
-
-            # Tentukan lokasi Chrome binary (pastikan benar)
-            chrome_binary = self.find_chrome_binary()
-            if chrome_binary:
-                options.binary_location = chrome_binary
-                logger.info(f"🔧 Using Chrome binary: {chrome_binary}")
-            else:
-                logger.warning("⚠️ Chrome binary not found, using default")
-
-            # --- Driver setup ---
-            logger.info("🔄 Setting up Chrome driver dengan webdriver_manager...")
-            service = ChromeService(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
+            # Launch browser dengan options
+            self.browser = await self.playwright.chromium.launch(
+                headless=False,  # Set True untuk production
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--window-size=1920,1080',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                ]
+            )
             
-            # Execute script untuk hide webdriver
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            # Create context dengan viewport dan user agent
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                ignore_https_errors=True
+            )
             
-            self.wait = WebDriverWait(self.driver, self.timeout)
-            logger.info("✅ Chrome driver setup completed successfully")
+            # Create page
+            self.page = await self.context.new_page()
+            
+            # Set default timeout
+            self.page.set_default_timeout(self.timeout)
+            
+            logger.info("✅ Playwright browser setup completed successfully")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Chrome driver setup failed: {e}")
-            # Cleanup jika gagal
-            if hasattr(self, 'user_data_dir') and self.user_data_dir and os.path.exists(self.user_data_dir):
-                try:
-                    shutil.rmtree(self.user_data_dir, ignore_errors=True)
-                    logger.info(f"🧹 Cleaned up user data directory: {self.user_data_dir}")
-                except Exception as cleanup_error:
-                    logger.warning(f"⚠️ Failed to cleanup user data directory: {cleanup_error}")
+            logger.error(f"❌ Playwright browser setup failed: {e}")
+            await self.cleanup_browser()
             return False
 
-    def find_and_click_element(self, selectors: List[str], description: str, offset_x: int = 0, offset_y: int = 0, count: int = 1) -> bool:
+    async def find_and_click_element(self, selectors: List[str], description: str, offset_x: int = 0, offset_y: int = 0, count: int = 1) -> bool:
         """Find and click element dengan multiple selector strategies"""
         try:
             for selector in selectors:
                 try:
-                    if selector.startswith('::-p-xpath('):
-                        # Extract XPath from Puppeteer format
-                        xpath = selector.replace('::-p-xpath(', '').rstrip(')')
-                        element = self.wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                    elif selector.startswith('::-p-aria('):
-                        # Skip ARIA selectors for now
-                        continue
+                    # Handle different selector types
+                    if selector.startswith('//'):
+                        # XPath selector
+                        element = await self.page.wait_for_selector(f"xpath={selector}", timeout=self.timeout)
                     elif selector.startswith('::-p-text('):
                         # Text-based selector
                         text = selector.replace('::-p-text(', '').rstrip(')')
-                        element = self.wait.until(EC.element_to_be_clickable((By.XPATH, f"//*[contains(text(), '{text}')]")))
-                    elif ' >>> ' in selector:
-                        # Shadow DOM selector - skip for now
-                        continue
+                        element = await self.page.wait_for_selector(f"text={text}", timeout=self.timeout)
                     else:
                         # CSS selector
-                        element = self.wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                        element = await self.page.wait_for_selector(selector, timeout=self.timeout)
                     
                     if element:
                         logger.info(f"✅ Found {description} dengan selector: {selector}")
                         
-                        # Use ActionChains untuk klik dengan offset
-                        actions = ActionChains(self.driver)
-                        actions.move_to_element_with_offset(element, offset_x, offset_y)
+                        # Click dengan offset jika diperlukan
+                        if offset_x != 0 or offset_y != 0:
+                            box = await element.bounding_box()
+                            if box:
+                                await self.page.mouse.click(box['x'] + offset_x, box['y'] + offset_y)
+                            else:
+                                await element.click()
+                        else:
+                            await element.click()
                         
-                        for _ in range(count):
-                            actions.click()
-                        
-                        actions.perform()
+                        # Multiple clicks jika diperlukan
+                        for _ in range(count - 1):
+                            await asyncio.sleep(0.5)
+                            await element.click()
                         
                         logger.info(f"✅ Clicked {description} dengan offset ({offset_x}, {offset_y})")
-                        time.sleep(2)
+                        await asyncio.sleep(2)
                         return True
                         
                 except Exception as e:
@@ -578,27 +533,30 @@ class TeraboxSeleniumUploader:
             logger.error(f"💥 Error finding/clicking {description}: {e}")
             return False
 
-    def find_and_fill_element(self, selectors: List[str], description: str, text: str) -> bool:
+    async def find_and_fill_element(self, selectors: List[str], description: str, text: str) -> bool:
         """Find and fill element dengan multiple selector strategies"""
         try:
             for selector in selectors:
                 try:
-                    if selector.startswith('::-p-xpath('):
-                        xpath = selector.replace('::-p-xpath(', '').rstrip(')')
-                        element = self.wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-                    elif selector.startswith('::-p-aria('):
-                        continue
-                    elif ' >>> ' in selector:
-                        continue
+                    # Handle different selector types
+                    if selector.startswith('//'):
+                        element = await self.page.wait_for_selector(f"xpath={selector}", timeout=self.timeout)
+                    elif selector.startswith('::-p-text('):
+                        text_sel = selector.replace('::-p-text(', '').rstrip(')')
+                        element = await self.page.wait_for_selector(f"text={text_sel}", timeout=self.timeout)
                     else:
-                        element = self.wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                        element = await self.page.wait_for_selector(selector, timeout=self.timeout)
                     
                     if element:
                         logger.info(f"✅ Found {description} dengan selector: {selector}")
-                        element.clear()
-                        element.send_keys(text)
+                        
+                        # Clear dan fill field
+                        await element.click(click_count=3)  # Triple click untuk select all
+                        await self.page.keyboard.press('Backspace')
+                        await element.fill(text)
+                        
                         logger.info(f"✅ Filled {description} dengan text: {text}")
-                        time.sleep(1)
+                        await asyncio.sleep(1)
                         return True
                         
                 except Exception as e:
@@ -612,17 +570,17 @@ class TeraboxSeleniumUploader:
             logger.error(f"💥 Error finding/filling {description}: {e}")
             return False
 
-    def login_to_terabox(self) -> bool:
+    async def login_to_terabox(self) -> bool:
         """Login ke Terabox menggunakan element yang tepat dari recording"""
         try:
             logger.info("🔐 Attempting to login to Terabox")
             
             # Step 1: Navigate to login page
-            self.driver.get('https://www.1024tera.com/webmaster/index')
-            time.sleep(5)
+            await self.page.goto('https://www.1024tera.com/webmaster/index', wait_until='networkidle')
+            await asyncio.sleep(5)
             
             # Step 2: Click login button dengan element dari recording
-            login_success = self.find_and_click_element([
+            login_success = await self.find_and_click_element([
                 'div.referral-content span',
                 '//*[@id="app"]/div[1]/div[2]/div[1]/div[2]/span',
                 '::-p-text(Log in)'
@@ -631,10 +589,10 @@ class TeraboxSeleniumUploader:
             if not login_success:
                 return False
             
-            time.sleep(3)
+            await asyncio.sleep(3)
             
             # Step 3: Click email login method
-            email_login_success = self.find_and_click_element([
+            email_login_success = await self.find_and_click_element([
                 'div.other-item > div:nth-of-type(2)',
                 '//*[@id="app"]/div[1]/div[1]/div[2]/div[2]/div/div[2]/div/div[4]/div[3]/div[2]'
             ], "email login method", offset_x=42.5, offset_y=24.6)
@@ -642,11 +600,11 @@ class TeraboxSeleniumUploader:
             if not email_login_success:
                 return False
             
-            time.sleep(3)
+            await asyncio.sleep(3)
             
             # Step 4: Click dan fill email field
-            email_click_success = self.find_and_click_element([
-                '::-p-aria(Enter your email)',
+            email_click_success = await self.find_and_click_element([
+                '[aria-label="Enter your email"]',
                 '#email-input',
                 '//*[@id="email-input"]'
             ], "email field", offset_x=65.5, offset_y=11.4)
@@ -654,20 +612,20 @@ class TeraboxSeleniumUploader:
             if not email_click_success:
                 return False
             
-            time.sleep(1)
+            await asyncio.sleep(1)
             
             # Double click email field (seperti di recording)
-            self.find_and_click_element([
-                '::-p-aria(Enter your email)',
+            await self.find_and_click_element([
+                '[aria-label="Enter your email"]',
                 '#email-input',
                 '//*[@id="email-input"]'
             ], "email field double click", offset_x=65.5, offset_y=13.4)
             
-            time.sleep(1)
+            await asyncio.sleep(1)
             
             # Fill email
-            email_fill_success = self.find_and_fill_element([
-                '::-p-aria(Enter your email)',
+            email_fill_success = await self.find_and_fill_element([
+                '[aria-label="Enter your email"]',
                 '#email-input',
                 '//*[@id="email-input"]'
             ], "email field", self.terabox_email)
@@ -675,11 +633,11 @@ class TeraboxSeleniumUploader:
             if not email_fill_success:
                 return False
             
-            time.sleep(2)
+            await asyncio.sleep(2)
             
             # Step 5: Click dan fill password field
-            password_click_success = self.find_and_click_element([
-                '::-p-aria(Enter the password.)',
+            password_click_success = await self.find_and_click_element([
+                '[aria-label="Enter the password."]',
                 '#pwd-input',
                 '//*[@id="pwd-input"]'
             ], "password field", offset_x=69.5, offset_y=27.4)
@@ -687,11 +645,11 @@ class TeraboxSeleniumUploader:
             if not password_click_success:
                 return False
             
-            time.sleep(1)
+            await asyncio.sleep(1)
             
             # Fill password
-            password_fill_success = self.find_and_fill_element([
-                '::-p-aria(Enter the password.)',
+            password_fill_success = await self.find_and_fill_element([
+                '[aria-label="Enter the password."]',
                 '#pwd-input',
                 '//*[@id="pwd-input"]'
             ], "password field", self.terabox_password)
@@ -699,10 +657,10 @@ class TeraboxSeleniumUploader:
             if not password_fill_success:
                 return False
             
-            time.sleep(2)
+            await asyncio.sleep(2)
             
             # Step 6: Click login submit button
-            login_submit_success = self.find_and_click_element([
+            login_submit_success = await self.find_and_click_element([
                 'div.btn-class-login',
                 '//*[@id="app"]/div[1]/div[1]/div[2]/div[2]/div/div[2]/div/div[3]/div/div[5]'
             ], "login submit button", offset_x=178.5, offset_y=23)
@@ -712,12 +670,12 @@ class TeraboxSeleniumUploader:
             
             # Wait for login process dan navigation
             logger.info("⏳ Waiting for login process...")
-            time.sleep(10)
+            await asyncio.sleep(10)
             
             # Verifikasi login berhasil
             try:
                 # Check jika kita di redirect ke halaman utama setelah login
-                current_url = self.driver.current_url
+                current_url = self.page.url
                 if 'webmaster/index' in current_url or 'webmaster/new/share' in current_url:
                     logger.info("✅ Login successful!")
                     return True
@@ -733,18 +691,18 @@ class TeraboxSeleniumUploader:
         except Exception as e:
             logger.error(f"💥 Login error: {e}")
             try:
-                self.driver.save_screenshot("login_error.png")
+                await self.page.screenshot(path="login_error.png")
             except:
                 pass
             return False
 
-    def navigate_to_upload_page(self) -> bool:
+    async def navigate_to_upload_page(self) -> bool:
         """Navigate ke halaman upload menggunakan element dari recording"""
         try:
             logger.info("🧭 Navigating to upload page...")
             
             # Step 1: Click guide container tab (seperti di recording)
-            guide_success = self.find_and_click_element([
+            guide_success = await self.find_and_click_element([
                 'div.guide-container > div.tab-item div',
                 '//*[@id="app"]/div[1]/div[2]/div[1]/div/div[2]/div[1]/span/div'
             ], "guide tab", offset_x=18, offset_y=14)
@@ -752,38 +710,38 @@ class TeraboxSeleniumUploader:
             if not guide_success:
                 logger.warning("⚠️ Could not click guide tab, trying direct navigation")
                 # Coba navigasi langsung ke upload page
-                self.driver.get('https://dm.1024tera.com/webmaster/new/share')
-                time.sleep(5)
+                await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
+                await asyncio.sleep(5)
                 return True
             
-            time.sleep(3)
+            await asyncio.sleep(3)
             
             # Step 2: Click source array item (Local File)
-            source_success = self.find_and_click_element([
+            source_success = await self.find_and_click_element([
                 'div.source-arr > div:nth-of-type(1) div:nth-of-type(2)',
                 '//*[@id="upload-container"]/div/div[2]/div[1]/div/div[2]'
             ], "source array item", offset_x=56, offset_y=19)
             
             if not source_success:
                 logger.warning("⚠️ Could not click source array, trying direct upload page")
-                self.driver.get('https://dm.1024tera.com/webmaster/new/share')
-                time.sleep(5)
+                await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
+                await asyncio.sleep(5)
                 return True
             
-            time.sleep(3)
+            await asyncio.sleep(3)
             return True
             
         except Exception as e:
             logger.error(f"💥 Navigation error: {e}")
             # Fallback ke direct navigation
             try:
-                self.driver.get('https://dm.1024tera.com/webmaster/new/share')
-                time.sleep(5)
+                await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
+                await asyncio.sleep(5)
                 return True
             except:
                 return False
 
-    def upload_files(self, folder_path: Path) -> List[str]:
+    async def upload_files(self, folder_path: Path) -> List[str]:
         """Upload files menggunakan element yang tepat dari recording"""
         try:
             links = []
@@ -802,25 +760,25 @@ class TeraboxSeleniumUploader:
             batch_files = all_files[:3]  # Batasi 3 file dulu untuk testing
             
             for i, file_path in enumerate(batch_files, 1):
-                if not self.upload_single_file(file_path, i, total_files):
+                if not await self.upload_single_file(file_path, i, total_files):
                     logger.error(f"❌ Failed to upload file: {file_path.name}")
                 else:
                     logger.info(f"✅ Successfully uploaded: {file_path.name}")
             
             # Extract links setelah semua file diupload
-            return self.extract_share_links()
+            return await self.extract_share_links()
             
         except Exception as e:
             logger.error(f"💥 Upload files error: {e}")
             return []
 
-    def upload_single_file(self, file_path: Path, current: int, total: int) -> bool:
+    async def upload_single_file(self, file_path: Path, current: int, total: int) -> bool:
         """Upload single file menggunakan element dari recording"""
         try:
             logger.info(f"📤 Uploading file {current}/{total}: {file_path.name}")
             
             # Step 1: Click input file element
-            file_input_success = self.find_and_click_element([
+            file_input_success = await self.find_and_click_element([
                 'input:nth-of-type(2)',
                 '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[1]/div[1]/div/input[2]'
             ], "file input", offset_x=0, offset_y=0)
@@ -829,14 +787,14 @@ class TeraboxSeleniumUploader:
                 logger.error("❌ Could not find file input element")
                 return False
             
-            time.sleep(2)
+            await asyncio.sleep(2)
             
-            # Step 2: Handle file picker - kita perlu menggunakan JavaScript untuk set file input
+            # Step 2: Handle file picker - Playwright memiliki cara yang lebih baik
             try:
-                file_inputs = self.driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
-                if file_inputs:
-                    file_input = file_inputs[0]
-                    file_input.send_keys(str(file_path.absolute()))
+                # Tunggu file input element
+                file_input = await self.page.wait_for_selector('input[type="file"]', timeout=self.timeout)
+                if file_input:
+                    await file_input.set_input_files(str(file_path.absolute()))
                     logger.info(f"✅ File sent to input: {file_path.name}")
                 else:
                     logger.error("❌ No file input element found")
@@ -845,10 +803,10 @@ class TeraboxSeleniumUploader:
                 logger.error(f"❌ Error setting file input: {e}")
                 return False
             
-            time.sleep(5)  # Wait for file upload
+            await asyncio.sleep(5)  # Wait for file upload
             
             # Step 3: Click Generate Link
-            generate_success = self.find_and_click_element([
+            generate_success = await self.find_and_click_element([
                 'div.share-way span',
                 '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[3]/div[1]/div[2]/div[2]/span',
                 '::-p-text(Generate Link)'
@@ -860,10 +818,10 @@ class TeraboxSeleniumUploader:
             
             # Wait for link generation
             logger.info("⏳ Waiting for link generation...")
-            time.sleep(10)
+            await asyncio.sleep(10)
             
             # Step 4: Copy link (multiple clicks seperti di recording)
-            copy_success = self.find_and_click_element([
+            copy_success = await self.find_and_click_element([
                 'div.media-item > img:nth-of-type(1)',
                 '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[3]/div/div[4]/img[1]'
             ], "copy button", offset_x=13, offset_y=12.85, count=3)
@@ -871,10 +829,10 @@ class TeraboxSeleniumUploader:
             if not copy_success:
                 logger.warning("⚠️ Could not click copy button, but upload might still be successful")
             
-            time.sleep(3)
+            await asyncio.sleep(3)
             
             # Step 5: Close modal (jika ada)
-            close_success = self.find_and_click_element([
+            close_success = await self.find_and_click_element([
                 'div.top-header > img',
                 '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[3]/div/div[1]/img'
             ], "close button", offset_x=3, offset_y=5)
@@ -882,7 +840,7 @@ class TeraboxSeleniumUploader:
             if not close_success:
                 logger.debug("ℹ️ No close button found, continuing...")
             
-            time.sleep(2)
+            await asyncio.sleep(2)
             
             return True
             
@@ -890,15 +848,15 @@ class TeraboxSeleniumUploader:
             logger.error(f"💥 Single file upload error: {e}")
             return False
 
-    def extract_share_links(self) -> List[str]:
+    async def extract_share_links(self) -> List[str]:
         """Extract sharing links dari halaman"""
         try:
             logger.info("🔍 Extracting share links from page...")
             
             links = []
             
-            # Cari link dalam page source
-            page_source = self.driver.page_source
+            # Cari link dalam page content
+            page_content = await self.page.content()
             
             # Pattern untuk Terabox share links
             patterns = [
@@ -907,7 +865,7 @@ class TeraboxSeleniumUploader:
             ]
             
             for pattern in patterns:
-                found_links = re.findall(pattern, page_source)
+                found_links = re.findall(pattern, page_content)
                 # Filter hanya link share yang valid
                 valid_links = [link for link in found_links if any(x in link for x in ['/s/', '/share/', 'download'])]
                 links.extend(valid_links)
@@ -919,7 +877,7 @@ class TeraboxSeleniumUploader:
             
             # Save screenshot untuk debugging
             try:
-                self.driver.save_screenshot("upload_result.png")
+                await self.page.screenshot(path="upload_result.png")
                 logger.info("📸 Saved upload result screenshot")
             except:
                 pass
@@ -930,27 +888,27 @@ class TeraboxSeleniumUploader:
             logger.error(f"❌ Link extraction error: {e}")
             return []
 
-    def upload_folder_via_selenium(self, folder_path: Path) -> List[str]:
-        """Main method untuk upload folder menggunakan Selenium dengan element exact"""
+    async def upload_folder_via_playwright(self, folder_path: Path) -> List[str]:
+        """Main method untuk upload folder menggunakan Playwright"""
         try:
-            if not self.setup_driver():
-                logger.error("❌ Driver setup failed, cannot proceed with upload")
+            if not await self.setup_browser():
+                logger.error("❌ Browser setup failed, cannot proceed with upload")
                 return []
 
-            logger.info(f"🚀 Starting Selenium upload for folder: {folder_path}")
+            logger.info(f"🚀 Starting Playwright upload for folder: {folder_path}")
             
             # Step 1: Login
-            if not self.login_to_terabox():
+            if not await self.login_to_terabox():
                 logger.error("❌ Login failed, cannot proceed with upload")
                 return []
             
             # Step 2: Navigate to upload page
-            if not self.navigate_to_upload_page():
+            if not await self.navigate_to_upload_page():
                 logger.error("❌ Navigation to upload page failed")
                 return []
             
             # Step 3: Upload files
-            links = self.upload_files(folder_path)
+            links = await self.upload_files(folder_path)
             
             if links:
                 logger.info(f"✅ Upload completed! {len(links)} links generated")
@@ -960,28 +918,29 @@ class TeraboxSeleniumUploader:
             return links
                 
         except Exception as e:
-            logger.error(f"💥 Selenium upload error: {e}")
+            logger.error(f"💥 Playwright upload error: {e}")
             try:
-                self.driver.save_screenshot(f"error_{int(time.time())}.png")
+                await self.page.screenshot(path=f"error_{int(time.time())}.png")
             except:
                 pass
             return []
         finally:
-            # Cleanup driver dan user data directory
-            if self.driver:
-                try:
-                    self.driver.quit()
-                    logger.info("✅ Chrome driver closed")
-                except Exception as e:
-                    logger.warning(f"⚠️ Error closing driver: {e}")
-            
-            # Cleanup user data directory
-            if hasattr(self, 'user_data_dir') and self.user_data_dir and os.path.exists(self.user_data_dir):
-                try:
-                    shutil.rmtree(self.user_data_dir, ignore_errors=True)
-                    logger.info(f"🧹 Cleaned up user data directory: {self.user_data_dir}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to cleanup user data directory: {e}")
+            await self.cleanup_browser()
+
+    async def cleanup_browser(self):
+        """Cleanup browser dan resources"""
+        try:
+            if self.page:
+                await self.page.close()
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            logger.info("✅ Playwright browser closed")
+        except Exception as e:
+            logger.warning(f"⚠️ Error closing browser: {e}")
 
     def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
         """Generate enhanced manual instructions berdasarkan element yang tepat"""
@@ -1022,7 +981,6 @@ class TeraboxSeleniumUploader:
 
 🔧 **Jika Automation Gagal**:
 - Pastikan Chrome terinstall di sistem
-- Pastikan chromedriver kompatibel dengan versi Chrome
 - Cek log untuk detail error
 
 💡 **Tips**:
@@ -1033,25 +991,21 @@ class TeraboxSeleniumUploader:
 """
         return instructions
 
-# [KELAS UploadManager, DownloadProcessor, DAN HANDLER TELEGRAM TETAP SAMA]
-# Untuk menghemat ruang, bagian ini tetap sama seperti kode sebelumnya
-# Hanya mengganti bagian TeraboxSeleniumUploader dengan yang sudah diperbaiki
-
 class UploadManager:
     def __init__(self):
         self.terabox_key = os.getenv('TERABOX_CONNECT_KEY')
         self.doodstream_key = os.getenv('DOODSTREAM_API_KEY')
-        self.terabox_selenium_uploader = TeraboxSeleniumUploader()
+        self.terabox_playwright_uploader = TeraboxPlaywrightUploader()
         self.terabox_lock = threading.Lock()
         
         # Counter global untuk urutan job upload
         self._job_counter = 1
         self._counter_lock = threading.Lock()
         
-        logger.info("📤 UploadManager initialized dengan Selenium uploader")
+        logger.info("📤 UploadManager initialized dengan Playwright uploader")
 
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox menggunakan Selenium automation dengan element yang tepat"""
+        """Upload files to Terabox menggunakan Playwright automation dengan element yang tepat"""
         logger.info(f"🚀 Starting Terabox upload untuk job {job_id}, folder: {folder_path}")
         
         try:
@@ -1067,11 +1021,11 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🎯 Method: Selenium dengan Element Exact dari Recording"
+                f"🎯 Method: Playwright dengan Element Exact dari Recording"
             )
 
             # Cek jika credential Terabox tersedia
-            if not self.terabox_selenium_uploader.terabox_email or not self.terabox_selenium_uploader.terabox_password:
+            if not self.terabox_playwright_uploader.terabox_email or not self.terabox_playwright_uploader.terabox_password:
                 await self.send_progress_message(
                     update, context, job_id,
                     "❌ Terabox credentials tidak ditemukan!\n"
@@ -1081,7 +1035,7 @@ class UploadManager:
                 )
                 return []
 
-            # Coba automation dengan Selenium menggunakan element yang tepat
+            # Coba automation dengan Playwright menggunakan element yang tepat
             await self.send_progress_message(
                 update, context, job_id,
                 "🔄 Mencoba login dan upload otomatis dengan element exact..."
@@ -1090,8 +1044,8 @@ class UploadManager:
             with self.terabox_lock:
                 logger.info("🔒 Acquired Terabox upload lock")
                 
-                # Try Selenium automation dengan element exact dari recording
-                links = self.terabox_selenium_uploader.upload_folder_via_selenium(folder_path)
+                # Try Playwright automation dengan element exact dari recording
+                links = await self.terabox_playwright_uploader.upload_folder_via_playwright(folder_path)
                 
                 if links:
                     success_msg = (
@@ -1121,7 +1075,7 @@ class UploadManager:
                         "📋 Beralih ke mode manual dengan instruksi lengkap..."
                     )
                     
-                    instructions = self.terabox_selenium_uploader.get_enhanced_manual_instructions(folder_path, job_number)
+                    instructions = self.terabox_playwright_uploader.get_enhanced_manual_instructions(folder_path, job_number)
                     await self.send_progress_message(update, context, job_id, instructions)
                     
                     return [f"Manual upload required - Job #{job_number}"]
@@ -1133,7 +1087,7 @@ class UploadManager:
             with self._counter_lock:
                 job_number = self._job_counter - 1
             
-            instructions = self.terabox_selenium_uploader.get_enhanced_manual_instructions(folder_path, job_number)
+            instructions = self.terabox_playwright_uploader.get_enhanced_manual_instructions(folder_path, job_number)
             await self.send_progress_message(update, context, job_id, instructions)
             
             return []
@@ -1523,9 +1477,6 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 # Start download processor
 download_processor.start_processing()
 
-# [HANDLER TELEGRAM BOT TETAP SAMA]
-# Untuk menghemat ruang, handler Telegram bot tetap sama seperti sebelumnya
-
 # Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message when the command /start is issued."""
@@ -1540,7 +1491,7 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream (Selenium Automation dengan Element Exact)
+📤 Upload ke Terabox/Doodstream (Playwright Automation dengan Element Exact)
 ⚙️ Customizable settings
 
 Commands:
@@ -1773,7 +1724,7 @@ Counter Info:
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
 Upload Method:
-🤖 Selenium Automation: Browser otomatis dengan element exact
+🤖 Playwright Automation: Browser otomatis dengan element exact
 🌐 URL: https://www.1024tera.com/webmaster/index
 🎯 Element: Exact dari recording Puppeteer
         """
@@ -1808,7 +1759,7 @@ Bot Status:
 
 Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
-🤖 Upload Method: Selenium dengan Element Exact
+🤖 Upload Method: Playwright dengan Element Exact
 📧 Terabox Email: {'✅ Set' if terabox_email else '❌ Not Set'}
 🔑 Terabox Password: {'✅ Set' if terabox_password else '❌ Not Set'}
 🌐 Target URL: https://www.1024tera.com/webmaster/index
@@ -1993,7 +1944,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Selenium Element Exact...")
+    logger.info("🚀 Starting Mega Downloader Bot dengan Playwright Element Exact...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -2020,14 +1971,15 @@ def main():
     else:
         logger.info("✅ Terabox credentials found")
     
-    # Install required packages untuk Chrome driver
+    # Install required packages untuk Playwright
     try:
-        import webdriver_manager
-        logger.info("✅ webdriver_manager is available")
+        import playwright
+        logger.info("✅ Playwright is available")
     except ImportError:
-        logger.warning("⚠️ webdriver_manager not installed, installing...")
-        subprocess.run(['pip', 'install', 'webdriver-manager'], check=True)
-        logger.info("✅ webdriver_manager installed")
+        logger.warning("⚠️ Playwright not installed, installing...")
+        subprocess.run(['pip', 'install', 'playwright'], check=True)
+        subprocess.run(['playwright', 'install', 'chromium'], check=True)
+        logger.info("✅ Playwright installed")
     
     # Initialize bot
     token = os.getenv('BOT_TOKEN')
@@ -2053,7 +2005,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan Selenium element exact automation!")
+    logger.info("✅ Bot started successfully dengan Playwright element exact automation!")
     application.run_polling()
 
 if __name__ == '__main__':
