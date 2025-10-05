@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import threading
 import time
+import tempfile
+from selenium import webdriver
 from datetime import datetime
 from queue import Queue
 from typing import Dict, List, Tuple, Optional
