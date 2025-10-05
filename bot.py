@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime
 from queue import Queue
 from typing import Dict, List, Tuple, Optional
@@ -34,6 +35,8 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service as ChromeService
 
 # Load environment variables
 load_dotenv()
@@ -440,6 +443,7 @@ class TeraboxSeleniumUploader:
         self.terabox_email = os.getenv('TERABOX_EMAIL')
         self.terabox_password = os.getenv('TERABOX_PASSWORD')
         self.timeout = 30
+        self.user_data_dir = None  # Untuk cleanup nanti
         logger.info("🌐 TeraboxSeleniumUploader initialized dengan login automation")
     
     def find_chrome_binary(self):
@@ -461,161 +465,67 @@ class TeraboxSeleniumUploader:
         logger.error("❌ Chrome binary not found in common locations")
         return None
 
-    def get_chrome_version(self):
-        """Get installed Chrome version"""
-        try:
-            chrome_binary = self.find_chrome_binary()
-            if chrome_binary:
-                result = subprocess.run([chrome_binary, '--version'], capture_output=True, text=True)
-                version_output = result.stdout.strip()
-                # Extract version number
-                version_match = re.search(r'(\d+\.\d+\.\d+\.\d+)', version_output)
-                if version_match:
-                    version = version_match.group(1)
-                    logger.info(f"🔍 Chrome version: {version}")
-                    return version
-            return None
-        except Exception as e:
-            logger.error(f"❌ Error getting Chrome version: {e}")
-            return None
-
-    def download_compatible_chromedriver(self):
-        """Download compatible chromedriver untuk Chrome versi 141"""
-        try:
-            logger.info("🔧 Downloading compatible chromedriver untuk Chrome 141...")
-            
-            # URL untuk Chrome 141
-            version = "141.0.7390.54"
-            url = f"https://storage.googleapis.com/chrome-for-testing-public/{version}/linux64/chromedriver-linux64.zip"
-            
-            import tempfile
-            import zipfile
-            
-            temp_dir = tempfile.mkdtemp()
-            zip_path = os.path.join(temp_dir, "chromedriver.zip")
-            
-            # Download
-            response = requests.get(url)
-            if response.status_code != 200:
-                logger.error(f"❌ Failed to download chromedriver: HTTP {response.status_code}")
-                return None
-            
-            with open(zip_path, 'wb') as f:
-                f.write(response.content)
-            
-            # Extract
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
-            
-            driver_path = os.path.join(temp_dir, "chromedriver-linux64", "chromedriver")
-            
-            # Make executable
-            os.chmod(driver_path, 0o755)
-            
-            # Cleanup zip file
-            os.remove(zip_path)
-            
-            logger.info(f"✅ Chromedriver downloaded successfully: {driver_path}")
-            return driver_path
-            
-        except Exception as e:
-            logger.error(f"❌ Chromedriver download failed: {e}")
-            return None
-
     def setup_driver(self):
-        """Setup Chrome driver dengan handling yang lebih baik untuk Chrome 141"""
+        """Setup Chrome driver dengan solusi VPS yang terbukti"""
         try:
-            chrome_options = Options()
-            
-            # Cari Chrome binary
-            chrome_binary = self.find_chrome_binary()
-            if chrome_binary:
-                chrome_options.binary_location = chrome_binary
-                logger.info(f"🔧 Using Chrome binary: {chrome_binary}")
-            else:
-                logger.warning("⚠️ Chrome binary not found, trying default...")
-            
-            # Opsi untuk stability
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--window-size=1536,835')
-            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            # --- Chrome Options ---
+            options = Options()
+
+            # Pastikan folder untuk profil Chrome disiapkan secara manual
+            profile_root = "/root/.config/chrome_profiles"
+            os.makedirs(profile_root, exist_ok=True)
+
+            # Buat subfolder unik berdasarkan UUID (jadi tetap unik antar sesi)
+            self.user_data_dir = os.path.join(profile_root, f"profile_{uuid.uuid4().hex}")
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            logger.info(f"🔧 Using user-data-dir: {self.user_data_dir}")
+
+            options.add_argument(f"--user-data-dir={self.user_data_dir}")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--remote-debugging-port=0")  # Random port untuk menghindari konflik
+            options.add_argument("--window-size=1536,835")
+            options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
             # Additional options untuk stability
-            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-            chrome_options.add_experimental_option('useAutomationExtension', False)
-            
-            # Gunakan unique user data directory untuk menghindari konflik
-            import tempfile
-            user_data_dir = tempfile.mkdtemp(prefix="chrome_profile_")
-            chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-            logger.info(f"🔧 Using unique user data directory: {user_data_dir}")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
             
             # Comment out headless untuk debugging
-            # chrome_options.add_argument('--headless')
+            # options.add_argument("--headless=new")
+
+            # Tentukan lokasi Chrome binary (pastikan benar)
+            chrome_binary = self.find_chrome_binary()
+            if chrome_binary:
+                options.binary_location = chrome_binary
+                logger.info(f"🔧 Using Chrome binary: {chrome_binary}")
+            else:
+                logger.warning("⚠️ Chrome binary not found, using default")
+
+            # --- Driver setup ---
+            logger.info("🔄 Setting up Chrome driver dengan webdriver_manager...")
+            service = ChromeService(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
             
-            # Setup service dengan handling error
-            from selenium.webdriver.chrome.service import Service
+            # Execute script untuk hide webdriver
+            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
-            max_retries = 2
-            for attempt in range(max_retries):
-                try:
-                    # Coba menggunakan webdriver_manager terlebih dahulu
-                    if attempt == 0:
-                        try:
-                            logger.info("🔄 Trying webdriver_manager...")
-                            from webdriver_manager.chrome import ChromeDriverManager
-                            from selenium.webdriver.chrome.service import Service as ChromeService
-                            
-                            driver_path = ChromeDriverManager().install()
-                            service = ChromeService(driver_path)
-                            self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                            
-                        except Exception as wdm_error:
-                            logger.warning(f"⚠️ webdriver_manager failed: {wdm_error}, trying direct download...")
-                            # Fallback ke direct download
-                            driver_path = self.download_compatible_chromedriver()
-                            if driver_path:
-                                service = Service(driver_path)
-                                self.driver = webdriver.Chrome(service=service, options=chrome_options)
-                            else:
-                                raise Exception("Both webdriver_manager and direct download failed")
-                    
-                    self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                    
-                    self.wait = WebDriverWait(self.driver, self.timeout)
-                    logger.info("✅ Chrome driver setup completed successfully")
-                    return True
-                    
-                except Exception as e:
-                    logger.warning(f"⚠️ Chrome driver setup attempt {attempt + 1} failed: {e}")
-                    
-                    # Cleanup driver jika ada
-                    if hasattr(self, 'driver') and self.driver:
-                        try:
-                            self.driver.quit()
-                        except:
-                            pass
-                    
-                    if attempt < max_retries - 1:
-                        time.sleep(3)
-                        continue
-                    else:
-                        # Final fallback - coba tanpa service path
-                        try:
-                            logger.info("🔄 Trying final fallback without specific service...")
-                            self.driver = webdriver.Chrome(options=chrome_options)
-                            self.wait = WebDriverWait(self.driver, self.timeout)
-                            logger.info("✅ Chrome driver setup completed with fallback")
-                            return True
-                        except Exception as final_error:
-                            logger.error(f"❌ All Chrome driver setup attempts failed: {final_error}")
-                            return False
-                        
+            self.wait = WebDriverWait(self.driver, self.timeout)
+            logger.info("✅ Chrome driver setup completed successfully")
+            return True
+            
         except Exception as e:
-            logger.error(f"❌ Failed to setup Chrome driver: {e}")
+            logger.error(f"❌ Chrome driver setup failed: {e}")
+            # Cleanup jika gagal
+            if hasattr(self, 'user_data_dir') and self.user_data_dir and os.path.exists(self.user_data_dir):
+                try:
+                    shutil.rmtree(self.user_data_dir, ignore_errors=True)
+                    logger.info(f"🧹 Cleaned up user data directory: {self.user_data_dir}")
+                except Exception as cleanup_error:
+                    logger.warning(f"⚠️ Failed to cleanup user data directory: {cleanup_error}")
             return False
 
     def find_and_click_element(self, selectors: List[str], description: str, offset_x: int = 0, offset_y: int = 0, count: int = 1) -> bool:
@@ -1057,9 +967,21 @@ class TeraboxSeleniumUploader:
                 pass
             return []
         finally:
+            # Cleanup driver dan user data directory
             if self.driver:
-                self.driver.quit()
-                logger.info("✅ Chrome driver closed")
+                try:
+                    self.driver.quit()
+                    logger.info("✅ Chrome driver closed")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error closing driver: {e}")
+            
+            # Cleanup user data directory
+            if hasattr(self, 'user_data_dir') and self.user_data_dir and os.path.exists(self.user_data_dir):
+                try:
+                    shutil.rmtree(self.user_data_dir, ignore_errors=True)
+                    logger.info(f"🧹 Cleaned up user data directory: {self.user_data_dir}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to cleanup user data directory: {e}")
 
     def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
         """Generate enhanced manual instructions berdasarkan element yang tepat"""
@@ -1110,6 +1032,10 @@ class TeraboxSeleniumUploader:
 - Pastikan login berhasil sebelum upload
 """
         return instructions
+
+# [KELAS UploadManager, DownloadProcessor, DAN HANDLER TELEGRAM TETAP SAMA]
+# Untuk menghemat ruang, bagian ini tetap sama seperti kode sebelumnya
+# Hanya mengganti bagian TeraboxSeleniumUploader dengan yang sudah diperbaiki
 
 class UploadManager:
     def __init__(self):
@@ -1596,6 +1522,9 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 
 # Start download processor
 download_processor.start_processing()
+
+# [HANDLER TELEGRAM BOT TETAP SAMA]
+# Untuk menghemat ruang, handler Telegram bot tetap sama seperti sebelumnya
 
 # Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
