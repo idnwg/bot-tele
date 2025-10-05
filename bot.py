@@ -435,8 +435,19 @@ class TeraboxPlaywrightUploader:
         self.page = None
         self.terabox_email = os.getenv('TERABOX_EMAIL')
         self.terabox_password = os.getenv('TERABOX_PASSWORD')
+        self.current_domain = None  # Tambahkan untuk menyimpan domain dinamis
         self.timeout = 30000  # 30 seconds in milliseconds
         logger.info("🌐 TeraboxPlaywrightUploader initialized dengan login automation")
+
+    def get_current_domain(self, url: str) -> str:
+        """Extract domain from URL"""
+        try:
+            domain = url.split('/')[2]  # ambil domain dari URL
+            logger.info(f"🌐 Extracted domain: {domain}")
+            return domain
+        except Exception as e:
+            logger.warning(f"⚠️ Could not extract domain from {url}, using fallback: {e}")
+            return "dm.1024tera.com"  # fallback domain
 
     async def setup_browser(self):
         """Setup Playwright browser dengan configurasi headless"""
@@ -699,20 +710,20 @@ class TeraboxPlaywrightUploader:
             await asyncio.sleep(10)
             await self.wait_for_network_idle()
             
-            # Verifikasi login berhasil
-            try:
-                # Check jika kita di redirect ke halaman utama setelah login
-                current_url = self.page.url
-                if 'webmaster/index' in current_url or 'webmaster/new/share' in current_url:
-                    logger.info("✅ Login successful!")
-                    return True
-                else:
-                    logger.warning(f"⚠️ Unexpected URL after login: {current_url}")
-                    # Coba lanjutkan anyway - mungkin sudah login
-                    return True
-            except Exception as e:
-                logger.warning(f"⚠️ Login verification warning: {e}")
-                # Coba lanjutkan anyway
+            # Verifikasi login berhasil dan simpan domain
+            current_url = self.page.url
+            logger.info(f"🌐 Current URL after login: {current_url}")
+            
+            # Simpan domain untuk navigasi selanjutnya
+            self.current_domain = self.get_current_domain(current_url)
+            logger.info(f"💾 Saved domain for navigation: {self.current_domain}")
+            
+            if 'webmaster/index' in current_url or 'webmaster/new/share' in current_url or 'webmaster/new/home' in current_url:
+                logger.info("✅ Login successful!")
+                return True
+            else:
+                logger.warning(f"⚠️ Unexpected URL after login: {current_url}")
+                # Coba lanjutkan anyway - mungkin sudah login
                 return True
                 
         except Exception as e:
@@ -725,30 +736,56 @@ class TeraboxPlaywrightUploader:
             return False
 
     async def navigate_to_upload_page(self) -> bool:
-        """Navigate ke halaman upload"""
+        """Navigate ke halaman upload dengan domain yang sesuai"""
         try:
             logger.info("🧭 Navigating to upload page...")
             
-            # Coba navigasi langsung ke upload page
-            await self.page.goto('https://www.1024tera.com/webmaster/new/share', wait_until='networkidle')
+            # Gunakan domain dari sesi login, atau fallback ke dm.1024tera.com
+            if self.current_domain:
+                upload_url = f"https://{self.current_domain}/webmaster/new/share"
+            else:
+                upload_url = "https://dm.1024tera.com/webmaster/new/share"
+                logger.warning("⚠️ Using fallback domain: dm.1024tera.com")
+            
+            logger.info(f"🌐 Attempting navigation to: {upload_url}")
+            
+            # Coba navigasi dengan timeout yang lebih lama
+            await self.page.goto(upload_url, wait_until='networkidle', timeout=60000)
             await asyncio.sleep(5)
             await self.wait_for_network_idle()
             
             # Check jika sudah di halaman upload
             current_url = self.page.url
+            logger.info(f"🌐 Current URL after navigation: {current_url}")
+            
             if 'new/share' in current_url:
                 logger.info("✅ Successfully navigated to upload page")
                 return True
             else:
                 logger.warning(f"⚠️ Not on upload page, current URL: {current_url}")
-                # Coba alternative URL
-                await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
+                
+                # Coba alternative approach: gunakan domain dari URL saat ini
+                current_domain = self.get_current_domain(current_url)
+                alternative_url = f"https://{current_domain}/webmaster/new/share"
+                logger.info(f"🔄 Trying alternative URL: {alternative_url}")
+                
+                await self.page.goto(alternative_url, wait_until='networkidle', timeout=60000)
                 await asyncio.sleep(5)
+                
                 return 'new/share' in self.page.url
                 
         except Exception as e:
             logger.error(f"💥 Navigation error: {e}")
-            return False
+            
+            # Fallback ke domain default
+            try:
+                logger.info("🔄 Trying fallback to default domain...")
+                await self.page.goto("https://dm.1024tera.com/webmaster/new/share", wait_until='networkidle', timeout=60000)
+                await asyncio.sleep(5)
+                return 'new/share' in self.page.url
+            except Exception as fallback_error:
+                logger.error(f"💥 Fallback navigation also failed: {fallback_error}")
+                return False
 
     async def upload_files(self, folder_path: Path) -> List[str]:
         """Upload files menggunakan element yang tepat dari recording"""
@@ -968,22 +1005,25 @@ class TeraboxPlaywrightUploader:
             logger.warning(f"⚠️ Error closing browser: {e}")
 
     def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
-        """Generate enhanced manual instructions"""
+        """Generate enhanced manual instructions dengan domain yang sesuai"""
         file_count = len(list(folder_path.rglob('*')))
+        
+        # Gunakan domain yang tersimpan atau fallback
+        domain = self.current_domain if self.current_domain else "dm.1024tera.com"
         
         instructions = f"""
 📋 **INSTRUKSI UPLOAD MANUAL TERABOX - Job #{job_number}**
 
 🎯 **Langkah-langkah Upload**:
 
-1. **Buka Website**: https://www.1024tera.com/webmaster/index
+1. **Buka Website**: https://{domain}/webmaster/index
 
 2. **Login**:
    - Email: {self.terabox_email}
    - Password: [tersembunyi]
 
 3. **Navigasi ke Upload**:
-   - Buka: https://www.1024tera.com/webmaster/new/share
+   - Buka: https://{domain}/webmaster/new/share
 
 4. **Upload File**:
    - Klik area upload atau file input
