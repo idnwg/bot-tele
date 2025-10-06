@@ -850,35 +850,42 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ No files found in folder")
                 return []
             
-            # Step 1: Hover dan klik area "Local File" untuk memunculkan opsi upload
+            # ========== PERBAIKAN: TAMBAH HOOVER DAN SELECTOR TAMBAHAN ==========
+            
+            # Step 1: Hover ke area 'Local file' agar menu upload muncul
             try:
-                # Hover pada area "Local File"
-                local_file_area = "div.source-arr > div:nth-of-type(1) div:nth-of-type(2)"
-                await self.page.hover(local_file_area)
-                await asyncio.sleep(2)  # Beri waktu agar menu muncul
-                logger.info("🖱️ Hovered on Local File area")
+                logger.info("🖱️ Hovering to 'Local file' area...")
+                await page.hover("div.source-arr > div:nth-of-type(1) div:nth-of-type(2)")
+                await asyncio.sleep(1.5)
+                logger.info("✅ Hover success, waiting for upload menu...")
 
-                # Klik menu upload folder
-                await self.page.click("text=Upload Folder", timeout=10000)
-                logger.info("📁 Clicked on 'Upload Folder' option")
+                # Klik tombol upload folder
+                await page.click("text=Upload Folder", timeout=5000)
+                logger.info("📁 Clicked 'Upload Folder'")
+                await asyncio.sleep(1.5)
+
             except Exception as e:
-                logger.warning(f"⚠️ Gagal menemukan tombol Upload Folder dengan hover: {e}")
-                # Fallback: coba klik langsung
+                logger.warning(f"⚠️ Gagal hover/klik Upload Folder: {e}")
+                # Fallback: coba klik langsung tanpa hover
                 try:
-                    await self.page.click("text=Upload Folder", timeout=10000)
-                    logger.info("📁 Clicked on 'Upload Folder' directly")
+                    await page.click("text=Upload Folder", timeout=5000)
+                    logger.info("📁 Clicked 'Upload Folder' directly")
+                    await asyncio.sleep(1.5)
                 except Exception as e2:
                     logger.error(f"❌ Fallback click juga gagal: {e2}")
                     return await self.upload_files_individual(folder_path)
             
-            # Step 2: Cari input upload folder yang tersembunyi
+            # Step 2: Cari input upload folder yang tersembunyi dengan selector tambahan
             upload_input = None
             selectors = [
                 "input[webkitdirectory]",
-                "input[type='file'][directory]",
-                "input:nth-of-type(2)",  # dari hasil recorder - elemen tersembunyi kedua
+                "input[directory]",
+                "input[type='file']",
+                "input:nth-of-type(2)",
                 "input#fileElem",
-                "input[type='file']"
+                "div.source-arr input",  # tambahan untuk area upload terabox
+                "input[accept]",
+                "input[name='file']"
             ]
             
             for selector in selectors:
@@ -895,6 +902,8 @@ class TeraboxPlaywrightUploader:
                 # Screenshot untuk debugging
                 await self.page.screenshot(path="upload_folder_debug.png", full_page=True)
                 return await self.upload_files_individual(folder_path)
+            
+            # ========== END PERBAIKAN ==========
             
             # Step 3: Upload folder ke Terabox
             try:
