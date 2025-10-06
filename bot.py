@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Constants
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.mpeg'}
-DOWNLOAD_BASE = Path('downloads')
+DOWNLOAD_BASE = Path('/root/bot-tele/downloads')  # Path absolut
 MAX_CONCURRENT_DOWNLOADS = 2
 
 # Global state
@@ -244,6 +244,34 @@ class MegaManager:
             debug_info['error'] = str(e)
             logger.error(f"❌ Debug session error: {e}")
             return debug_info
+
+    def find_downloaded_folder(self, job_id: str) -> Optional[Path]:
+        """Find the actual downloaded folder in DOWNLOAD_BASE"""
+        try:
+            logger.info(f"🔍 Searching for downloaded folder for job {job_id}")
+            
+            # List semua folder di DOWNLOAD_BASE
+            all_items = list(DOWNLOAD_BASE.iterdir())
+            folders = [item for item in all_items if item.is_dir()]
+            
+            logger.info(f"📁 Found {len(folders)} folders in download directory:")
+            for folder in folders:
+                # Hitung jumlah file dalam folder
+                files = list(folder.rglob('*'))
+                file_count = len([f for f in files if f.is_file()])
+                logger.info(f"  - {folder.name}: {file_count} files")
+                
+                # Jika folder berisi file, anggap ini adalah folder hasil download
+                if file_count > 0:
+                    logger.info(f"✅ Selected folder for upload: {folder.name} with {file_count} files")
+                    return folder
+            
+            logger.error("❌ No folders with files found for upload")
+            return None
+            
+        except Exception as e:
+            logger.error(f"💥 Error finding downloaded folder: {e}")
+            return None
     
     def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str]:
         """Download folder from Mega.nz using mega-get with detailed logging"""
@@ -260,7 +288,7 @@ class MegaManager:
                 debug_info = self.debug_mega_session()
                 logger.info(f"🔧 Debug info for {job_id}: {json.dumps(debug_info, indent=2)}")
                 
-                # HANYA pastikan base download directory ada, folder spesifik akan dibuat oleh mega-get
+                # Pastikan base download directory ada
                 DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
                 logger.info(f"📁 Base download directory ready: {DOWNLOAD_BASE}")
                 
@@ -275,13 +303,13 @@ class MegaManager:
                     logger.error(f"❌ {error_msg}")
                     return False, error_msg
                 
-                # Change to base download directory for mega-get (bukan folder spesifik)
+                # Change to base download directory for mega-get
                 original_cwd = os.getcwd()
                 os.chdir(DOWNLOAD_BASE)
                 logger.info(f"📂 Changed working directory to base: {DOWNLOAD_BASE}")
                 
                 try:
-                    # Now download using mega-get - biarkan mega-get yang membuat folder
+                    # Now download using mega-get
                     download_cmd = [self.mega_get_path, folder_url]
                     logger.info(f"⚡ Executing download command: {' '.join(download_cmd)}")
                     
@@ -310,39 +338,47 @@ class MegaManager:
                         logger.info("⏳ Waiting for files to stabilize...")
                         time.sleep(5)
                         
-                        # Check if files were actually downloaded
-                        # mega-get biasanya membuat folder dengan nama berdasarkan link
-                        all_files = list(DOWNLOAD_BASE.rglob('*'))
+                        # Cari folder yang berhasil di-download
+                        downloaded_folder = self.find_downloaded_folder(job_id)
+                        
+                        if not downloaded_folder:
+                            error_msg = "Download completed but no folder with files was found"
+                            logger.error(f"❌ {error_msg}")
+                            return False, error_msg
+                        
+                        # Update download path dengan folder yang sebenarnya
+                        actual_download_path = downloaded_folder
+                        logger.info(f"✅ Found downloaded folder: {actual_download_path}")
+                        
+                        # Check files in the actual folder
+                        all_files = list(actual_download_path.rglob('*'))
                         files = [f for f in all_files if f.is_file()]
-                        directories = [f for f in all_files if f.is_dir()]
-                        
-                        logger.info(f"📊 File check results: {len(files)} files, {len(directories)} directories")
-                        
-                        # Log all files and directories for debugging
-                        for f in files:
-                            try:
-                                file_size = f.stat().st_size
-                                logger.info(f"📄 File: {f.relative_to(DOWNLOAD_BASE)} ({file_size} bytes)")
-                            except Exception as e:
-                                logger.warning(f"⚠️ Could not stat file {f}: {e}")
-                        
-                        for d in directories:
-                            logger.info(f"📁 Directory: {d.relative_to(DOWNLOAD_BASE)}")
                         
                         total_files = len(files)
                         
                         if total_files == 0:
-                            error_msg = "Download completed but no files were found"
+                            error_msg = "Download completed but no files were found in the folder"
                             logger.error(f"❌ {error_msg}")
-                            # Check output for clues
-                            if "error" in result.stdout.lower() or "error" in result.stderr.lower():
-                                error_msg = f"Download completed with errors: {result.stdout} {result.stderr}"
-                            elif "no such file" in result.stdout.lower() or "no such file" in result.stderr.lower():
-                                error_msg = "Folder not found or inaccessible"
                             return False, error_msg
                         
-                        success_msg = f"Download successful! {total_files} files downloaded in {download_duration:.2f}s"
+                        # Log all files for debugging
+                        for f in files[:10]:  # Log first 10 files only
+                            try:
+                                file_size = f.stat().st_size
+                                logger.info(f"📄 File: {f.relative_to(actual_download_path)} ({file_size} bytes)")
+                            except Exception as e:
+                                logger.warning(f"⚠️ Could not stat file {f}: {e}")
+                        
+                        if total_files > 10:
+                            logger.info(f"📄 ... and {total_files - 10} more files")
+                        
+                        success_msg = f"Download successful! {total_files} files downloaded in {download_duration:.2f}s to {actual_download_path.name}"
                         logger.info(f"✅ {success_msg}")
+                        
+                        # Simpan path aktual ke active_downloads
+                        if job_id in active_downloads:
+                            active_downloads[job_id]['actual_download_path'] = str(actual_download_path)
+                        
                         return True, success_msg
                     else:
                         error_msg = result.stderr if result.stderr else result.stdout
@@ -1485,6 +1521,42 @@ class UploadManager:
                 )
                 return []
 
+            # Cek jika folder berisi file
+            all_files = [f for f in folder_path.rglob('*') if f.is_file()]
+            if not all_files:
+                await self.send_progress_message(
+                    update, context, job_id,
+                    f"❌ Folder is empty, nothing to upload!\n"
+                    f"📁 Path: {folder_path}\n"
+                    f"🔍 Checking folder contents..."
+                )
+                
+                # Debug: list semua isi folder
+                try:
+                    all_items = list(folder_path.rglob('*'))
+                    folders = [item for item in all_items if item.is_dir()]
+                    files = [item for item in all_items if item.is_file()]
+                    
+                    debug_info = f"📊 Folder contents:\n- Folders: {len(folders)}\n- Files: {len(files)}"
+                    for item in all_items[:10]:  # Tampilkan 10 item pertama
+                        debug_info += f"\n- {item.name} ({'dir' if item.is_dir() else 'file'})"
+                    
+                    if len(all_items) > 10:
+                        debug_info += f"\n- ... and {len(all_items) - 10} more items"
+                    
+                    await self.send_progress_message(update, context, job_id, debug_info)
+                except Exception as e:
+                    logger.error(f"Error checking folder contents: {e}")
+                
+                return []
+
+            await self.send_progress_message(
+                update, context, job_id,
+                f"✅ Folder ready for upload!\n"
+                f"📁 Files found: {len(all_files)}\n"
+                f"🔄 Starting Terabox automation..."
+            )
+
             # Coba automation dengan Playwright + buat folder
             await self.send_progress_message(
                 update, context, job_id,
@@ -1608,7 +1680,7 @@ class DownloadProcessor:
                 'user_settings': user_settings
             })
             
-            # Generate download path
+            # Generate download path (hanya untuk tracking, tidak digunakan untuk download sebenarnya)
             download_folder_name = f"download_{job_id}_{int(time.time())}"
             download_path = DOWNLOAD_BASE / download_folder_name
             
@@ -1638,17 +1710,41 @@ class DownloadProcessor:
                 )
                 return
             
-            # Update status to download completed
+            # Dapatkan path aktual dari download
+            actual_download_path = None
+            if 'actual_download_path' in active_downloads[job_id]:
+                actual_download_path = Path(active_downloads[job_id]['actual_download_path'])
+            else:
+                # Fallback: cari folder yang berisi file
+                actual_download_path = self.mega_manager.find_downloaded_folder(job_id)
+            
+            if not actual_download_path:
+                active_downloads[job_id].update({
+                    'status': DownloadStatus.ERROR.value,
+                    'error': 'Download completed but no folder found',
+                    'end_time': datetime.now()
+                })
+                
+                await self.upload_manager.send_progress_message(
+                    update, context, job_id,
+                    f"❌ Download completed but no folder found!\n"
+                    f"🆔 Job ID: {job_id}\n"
+                    f"🔍 Please check download directory manually"
+                )
+                return
+            
+            # Update status to download completed dengan path aktual
             active_downloads[job_id].update({
                 'status': DownloadStatus.DOWNLOAD_COMPLETED.value,
-                'download_path': str(download_path)
+                'download_path': str(actual_download_path),
+                'actual_download_path': str(actual_download_path)
             })
             
             await self.upload_manager.send_progress_message(
                 update, context, job_id,
                 f"✅ Download completed!\n"
                 f"🆔 Job ID: {job_id}\n"
-                f"📁 Path: {download_path.name}\n"
+                f"📁 Path: {actual_download_path.name}\n"
                 f"🔄 Starting file processing..."
             )
             
@@ -1657,7 +1753,7 @@ class DownloadProcessor:
                 active_downloads[job_id]['status'] = DownloadStatus.RENAMING.value
                 
                 prefix = user_settings.get('prefix', 'file_')
-                rename_result = self.file_manager.auto_rename_media_files(download_path, prefix)
+                rename_result = self.file_manager.auto_rename_media_files(actual_download_path, prefix)
                 
                 await self.upload_manager.send_progress_message(
                     update, context, job_id,
@@ -1677,11 +1773,11 @@ class DownloadProcessor:
                         update, context, job_id,
                         f"📤 Starting upload to Terabox...\n"
                         f"🆔 Job ID: {job_id}\n"
-                        f"📁 Folder: {download_path.name}\n"
+                        f"📁 Folder: {actual_download_path.name}\n"
                         f"🎯 Platform: {platform}"
                     )
                     
-                    links = await self.upload_manager.upload_to_terabox(download_path, update, context, job_id)
+                    links = await self.upload_manager.upload_to_terabox(actual_download_path, update, context, job_id)
                     
                     if links:
                         active_downloads[job_id].update({
@@ -1689,12 +1785,32 @@ class DownloadProcessor:
                             'upload_links': links,
                             'end_time': datetime.now()
                         })
+                        
+                        # Auto-cleanup jika berhasil upload
+                        if user_settings.get('auto_cleanup', True):
+                            try:
+                                shutil.rmtree(actual_download_path)
+                                logger.info(f"🧹 Cleaned up download folder: {actual_download_path}")
+                                await self.upload_manager.send_progress_message(
+                                    update, context, job_id,
+                                    f"🧹 Auto-cleanup completed!\n"
+                                    f"📁 Folder removed: {actual_download_path.name}"
+                                )
+                            except Exception as e:
+                                logger.warning(f"⚠️ Could not cleanup folder {actual_download_path}: {e}")
                     else:
                         active_downloads[job_id].update({
                             'status': DownloadStatus.ERROR.value,
                             'error': 'Upload failed',
                             'end_time': datetime.now()
                         })
+                        
+                        # Jangan hapus folder jika upload gagal
+                        await self.upload_manager.send_progress_message(
+                            update, context, job_id,
+                            f"❌ Upload failed! Folder preserved for manual upload.\n"
+                            f"📁 Path: {actual_download_path}"
+                        )
                 else:
                     # Other platforms can be added here
                     active_downloads[job_id].update({
@@ -1706,7 +1822,7 @@ class DownloadProcessor:
                         update, context, job_id,
                         f"✅ Download completed without upload!\n"
                         f"🆔 Job ID: {job_id}\n"
-                        f"📁 Path: {download_path}\n"
+                        f"📁 Path: {actual_download_path}\n"
                         f"💡 Platform {platform} not configured for auto-upload"
                     )
             else:
@@ -1720,17 +1836,9 @@ class DownloadProcessor:
                     update, context, job_id,
                     f"✅ Download completed!\n"
                     f"🆔 Job ID: {job_id}\n"
-                    f"📁 Path: {download_path}\n"
+                    f"📁 Path: {actual_download_path}\n"
                     f"💡 Auto-upload is disabled in settings"
                 )
-            
-            # Auto-cleanup if enabled
-            if user_settings.get('auto_cleanup', True) and active_downloads[job_id]['status'] == DownloadStatus.COMPLETED.value:
-                try:
-                    shutil.rmtree(download_path)
-                    logger.info(f"🧹 Cleaned up download folder: {download_path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not cleanup folder {download_path}: {e}")
             
             # Move to completed downloads
             completed_downloads[job_id] = active_downloads[job_id]
@@ -2165,9 +2273,13 @@ def main():
     """Start the bot"""
     logger.info("🚀 Starting Mega Downloader Bot dengan Upload Semua File + Buat Folder Terabox...")
     
-    # Create base download directory
+    # Create base download directory dengan path absolut
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
     logger.info(f"📁 Base download directory: {DOWNLOAD_BASE}")
+    
+    # Check current working directory
+    cwd = os.getcwd()
+    logger.info(f"📂 Current working directory: {cwd}")
     
     # Check Mega.nz installation
     mega_get_exists = os.path.exists(mega_manager.mega_get_path)
