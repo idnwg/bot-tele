@@ -855,12 +855,12 @@ class TeraboxPlaywrightUploader:
             # Step 1: Hover ke area 'Local file' agar menu upload muncul
             try:
                 logger.info("🖱️ Hovering to 'Local file' area...")
-                await page.hover("div.source-arr > div:nth-of-type(1) div:nth-of-type(2)")
+                await self.page.hover("div.source-arr > div:nth-of-type(1) div:nth-of-type(2)")
                 await asyncio.sleep(1.5)
                 logger.info("✅ Hover success, waiting for upload menu...")
 
                 # Klik tombol upload folder
-                await page.click("text=Upload Folder", timeout=5000)
+                await self.page.click("text=Upload Folder", timeout=5000)
                 logger.info("📁 Clicked 'Upload Folder'")
                 await asyncio.sleep(1.5)
 
@@ -868,7 +868,7 @@ class TeraboxPlaywrightUploader:
                 logger.warning(f"⚠️ Gagal hover/klik Upload Folder: {e}")
                 # Fallback: coba klik langsung tanpa hover
                 try:
-                    await page.click("text=Upload Folder", timeout=5000)
+                    await self.page.click("text=Upload Folder", timeout=5000)
                     logger.info("📁 Clicked 'Upload Folder' directly")
                     await asyncio.sleep(1.5)
                 except Exception as e2:
@@ -1007,8 +1007,8 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ No media files found to upload")
                 return []
             
-            # Untuk folder Mega.nz, batasi jumlah file yang diupload
-            batch_files = media_files[:15]  # Increase limit untuk folder
+            # PERBAIKAN: Upload semua file, tidak dibatasi hanya 15 file
+            batch_files = media_files  # Hapus batasan [:15]
             
             successful_uploads = 0
             
