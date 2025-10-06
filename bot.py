@@ -440,15 +440,283 @@ class TeraboxPlaywrightUploader:
         self.timeout = 45000  # 45 seconds in milliseconds
         logger.info("🌐 TeraboxPlaywrightUploader initialized dengan session persistence")
 
+    async def upload_all_files_to_terabox(self, download_folder: Path, logger: logging.Logger) -> List[str]:
+        """
+        Upload semua file sekaligus dari folder download ke Terabox
+        dengan membuat folder baru berdasarkan nama folder download
+        """
+        try:
+            folder_name = download_folder.name
+            logger.info(f"🚀 MEMULAI UPLOAD - Folder: {folder_name}")
+            
+            # Step 1: Dapatkan semua file dari folder
+            all_files = [f for f in download_folder.rglob('*') if f.is_file()]
+            total_files = len(all_files)
+            
+            logger.info(f"📁 MENEMUKAN FILE - {total_files} file di {download_folder}")
+            
+            if total_files == 0:
+                logger.error("❌ TIDAK ADA FILE - Folder kosong, tidak ada yang bisa diupload")
+                return []
+
+            # Step 2: Setup browser dan login
+            logger.info("🔄 SETUP BROWSER - Memulai browser Playwright...")
+            if not await self.setup_browser(use_session=True):
+                logger.error("❌ SETUP BROWSER GAGAL - Tidak bisa melanjutkan upload")
+                return []
+
+            # Step 3: Login ke Terabox
+            logger.info("🔐 LOGIN - Memproses login Terabox...")
+            if not await self.login_to_terabox():
+                logger.error("❌ LOGIN GAGAL - Tidak bisa melanjutkan upload")
+                return []
+
+            # Step 4: Navigasi ke halaman upload
+            logger.info("🧭 NAVIGASI - Menuju halaman upload...")
+            if not await self.navigate_to_upload_page():
+                logger.error("❌ NAVIGASI GAGAL - Tidak bisa mengakses halaman upload")
+                return []
+
+            # Step 5: Buat folder baru di Terabox
+            logger.info(f"📁 MEMBUAT FOLDER - Membuat folder '{folder_name}' di Terabox...")
+            if not await self.create_new_folder(folder_name):
+                logger.warning("⚠️ BUAT FOLDER GAGAL - Melanjutkan upload ke root folder")
+
+            # Step 6: Klik tombol upload file
+            logger.info("🖱️ KLIK UPLOAD - Mencari dan mengklik tombol upload...")
+            upload_clicked = await self.click_upload_button()
+            
+            if not upload_clicked:
+                logger.error("❌ KLIK UPLOAD GAGAL - Tidak bisa menemukan tombol upload")
+                return []
+
+            await asyncio.sleep(2)
+
+            # Step 7: Cari elemen input file
+            logger.info("🔍 MENCARI INPUT FILE - Mencari elemen input file...")
+            file_input, is_multiple = await self.find_file_input()
+            
+            if not file_input:
+                logger.error("❌ INPUT FILE TIDAK DITEMUKAN - Tidak menemukan elemen input file")
+                await self.page.screenshot(path="upload_input_error.png")
+                return []
+
+            # Step 8: Upload semua file sekaligus
+            logger.info(f"📤 UPLOAD FILE - Mengupload {total_files} file sekaligus...")
+            upload_success = await self.upload_files_batch(file_input, all_files, is_multiple, logger)
+            
+            if not upload_success:
+                logger.error("❌ UPLOAD BATCH GAGAL - Fallback ke upload individual")
+                return await self.upload_files_individual_fallback(download_folder, logger)
+
+            # Step 9: Tunggu upload selesai
+            logger.info("⏳ MENUNGGU UPLOAD - Menunggu proses upload selesai...")
+            await asyncio.sleep(10)
+            await self.wait_for_network_idle()
+
+            # Step 10: Klik Generate Link
+            logger.info("🔗 GENERATE LINK - Mengklik tombol Generate Link...")
+            generate_success = await self.click_generate_link()
+            
+            if not generate_success:
+                logger.error("❌ GENERATE LINK GAGAL - Tidak bisa mengklik tombol Generate Link")
+                return []
+
+            # Step 11: Tunggu generate link selesai
+            logger.info("⏳ MENUNGGU LINK - Menunggu proses generate link selesai...")
+            await asyncio.sleep(15)
+            await self.wait_for_network_idle()
+
+            # Step 12: Extract share links
+            logger.info("🔗 EKSTRAK LINK - Mengekstrak link sharing...")
+            links = await self.extract_share_links()
+            
+            if links:
+                logger.info(f"✅ UPLOAD SELESAI - {len(links)} link berhasil dihasilkan")
+                for i, link in enumerate(links, 1):
+                    logger.info(f"🔗 Link {i}: {link}")
+            else:
+                logger.warning("⚠️ UPLOAD SELESAI TAPI TIDAK ADA LINK - Upload selesai tetapi tidak ada link yang ditemukan")
+
+            # Step 13: Simpan session
+            await self.save_session()
+            logger.info("💾 SESSION DISIMPAN - Session berhasil disimpan")
+
+            return links
+
+        except Exception as e:
+            logger.error(f"💥 UPLOAD ERROR - Error selama proses upload: {e}")
+            try:
+                await self.page.screenshot(path="upload_fatal_error.png", full_page=True)
+                logger.info("📸 SCREENSHOT ERROR - Screenshot error disimpan")
+            except Exception as screenshot_error:
+                logger.error(f"❌ SCREENSHOT GAGAL - Tidak bisa menyimpan screenshot: {screenshot_error}")
+            return []
+        finally:
+            await self.cleanup_browser()
+            logger.info("🧹 BROWSER DIBERSIHKAN - Browser ditutup dengan aman")
+
+    async def click_upload_button(self) -> bool:
+        """Klik tombol upload file dengan berbagai selector"""
+        upload_button_selectors = [
+            "div.source-arr > div:nth-of-type(1) div:nth-of-type(2)",
+            "div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img",
+            "text=Upload File",
+            "text=Local File",
+            "div.local-item",
+        ]
+        
+        for selector in upload_button_selectors:
+            try:
+                await self.page.click(selector, timeout=10000)
+                logger.info(f"✅ Tombol upload diklik dengan selector: {selector}")
+                return True
+            except Exception as e:
+                logger.debug(f"❌ Selector {selector} gagal: {e}")
+                continue
+        
+        return False
+
+    async def find_file_input(self) -> Tuple[Optional[any], bool]:
+        """Cari elemen input file dan cek apakah mendukung multiple"""
+        input_selectors = [
+            "input[type='file'][multiple]",
+            "input[type='file']",
+            "input[webkitdirectory]",
+            "input[directory]",
+            "input#fileElem",
+            "div.source-arr input",
+            "input[accept]",
+            "input[name='file']"
+        ]
+        
+        for selector in input_selectors:
+            try:
+                file_input = await self.page.query_selector(selector)
+                if file_input:
+                    is_multiple = await file_input.get_attribute("multiple")
+                    logger.info(f"✅ Input file ditemukan: {selector}, multiple: {bool(is_multiple)}")
+                    return file_input, bool(is_multiple)
+            except Exception as e:
+                logger.debug(f"❌ Selector {selector} gagal: {e}")
+                continue
+        
+        return None, False
+
+    async def upload_files_batch(self, file_input: any, all_files: List[Path], is_multiple: bool, logger: logging.Logger) -> bool:
+        """Upload semua file sekaligus atau satu per satu berdasarkan kemampuan input"""
+        try:
+            file_paths = [str(f.absolute()) for f in all_files]
+            
+            if is_multiple and len(file_paths) > 0:
+                # Upload semua file sekaligus
+                await file_input.set_input_files(file_paths)
+                logger.info(f"✅ UPLOAD BATCH BERHASIL - {len(file_paths)} file diupload sekaligus")
+                return True
+            else:
+                # Fallback: upload satu per satu
+                logger.info("🔄 MULTIPLE UPLOAD TIDAK DIDUKUNG - Fallback ke upload individual")
+                for i, file_path in enumerate(file_paths, 1):
+                    try:
+                        await file_input.set_input_files([file_path])
+                        logger.info(f"✅ Upload file {i}/{len(file_paths)}: {Path(file_path).name}")
+                        if i < len(file_paths):
+                            await asyncio.sleep(2)  # Jeda antara upload
+                    except Exception as e:
+                        logger.error(f"❌ Gagal upload file {i}: {e}")
+                        continue
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ UPLOAD BATCH ERROR: {e}")
+            return False
+
+    async def upload_files_individual_fallback(self, download_folder: Path, logger: logging.Logger) -> List[str]:
+        """Fallback method untuk upload file satu per satu"""
+        try:
+            logger.info("🔄 FALLBACK KE UPLOAD INDIVIDUAL")
+            
+            all_files = [f for f in download_folder.rglob('*') if f.is_file()]
+            links = []
+            successful_uploads = 0
+            
+            for i, file_path in enumerate(all_files, 1):
+                logger.info(f"📤 Upload individual {i}/{len(all_files)}: {file_path.name}")
+                
+                # Klik upload button untuk setiap file
+                if not await self.click_upload_button():
+                    logger.error(f"❌ Gagal klik upload button untuk file {i}")
+                    continue
+                
+                await asyncio.sleep(2)
+                
+                # Cari input file
+                file_input, _ = await self.find_file_input()
+                if not file_input:
+                    logger.error(f"❌ Input file tidak ditemukan untuk file {i}")
+                    continue
+                
+                # Upload file
+                try:
+                    await file_input.set_input_files([str(file_path.absolute())])
+                    successful_uploads += 1
+                    logger.info(f"✅ Berhasil upload file {i}")
+                    
+                    # Tunggu antara upload
+                    if i < len(all_files):
+                        await asyncio.sleep(3)
+                        
+                except Exception as e:
+                    logger.error(f"❌ Gagal upload file {i}: {e}")
+                    continue
+            
+            if successful_uploads > 0:
+                # Klik Generate Link setelah semua file diupload
+                await self.click_generate_link()
+                await asyncio.sleep(15)
+                links = await self.extract_share_links()
+                logger.info(f"📊 UPLOAD INDIVIDUAL SELESAI: {successful_uploads}/{len(all_files)} file, {len(links)} link")
+            
+            return links
+            
+        except Exception as e:
+            logger.error(f"💥 UPLOAD INDIVIDUAL ERROR: {e}")
+            return []
+
+    async def click_generate_link(self) -> bool:
+        """Klik tombol Generate Link"""
+        generate_selectors = [
+            'div.share-way span',
+            '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[3]/div[1]/div[2]/div[2]/span',
+            'text=Generate Link',
+            'button:has-text("Generate Link")',
+            '.generate-link-btn'
+        ]
+        
+        for selector in generate_selectors:
+            try:
+                if selector.startswith('text='):
+                    await self.page.click(selector, timeout=60000)
+                else:
+                    element = await self.page.wait_for_selector(selector, timeout=60000)
+                    await element.click()
+                logger.info(f"✅ Tombol Generate Link diklik dengan selector: {selector}")
+                return True
+            except Exception as e:
+                logger.debug(f"❌ Selector Generate Link {selector} gagal: {e}")
+                continue
+        
+        return False
+
     def get_current_domain(self, url: str) -> str:
         """Extract domain from URL"""
         try:
-            domain = url.split('/')[2]  # ambil domain dari URL
-            logger.info(f"🌐 Extracted domain: {domain}")
+            domain = url.split('/')[2]
+            logger.info(f"🌐 Domain terdeteksi: {domain}")
             return domain
         except Exception as e:
-            logger.warning(f"⚠️ Could not extract domain from {url}, using fallback: {e}")
-            return "dm.1024tera.com"  # fallback domain
+            logger.warning(f"⚠️ Tidak bisa extract domain dari {url}: {e}")
+            return "dm.1024tera.com"
 
     async def setup_browser(self, use_session: bool = True) -> bool:
         """Setup Playwright browser dengan session persistence"""
@@ -509,9 +777,6 @@ class TeraboxPlaywrightUploader:
             # Set default timeout
             self.page.set_default_timeout(self.timeout)
             
-            # Enable request interception untuk monitoring
-            await self.page.route("**/*", self.route_handler)
-            
             logger.info("✅ Playwright browser setup completed successfully")
             return True
             
@@ -531,14 +796,6 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"❌ Failed to save session: {e}")
             return False
-
-    async def route_handler(self, route):
-        """Handler untuk monitoring requests"""
-        try:
-            # Continue semua requests tanpa modifikasi
-            await route.continue_()
-        except Exception as e:
-            logger.debug(f"Route handler error: {e}")
 
     async def wait_for_network_idle(self, timeout: int = 30000):
         """Wait for network to be idle"""
@@ -561,14 +818,10 @@ class TeraboxPlaywrightUploader:
                     if selector.startswith('//'):
                         # XPath selector
                         element = await self.page.wait_for_selector(f"xpath={selector}", timeout=timeout)
-                    elif selector.startswith('::-p-text('):
+                    elif selector.startswith('text='):
                         # Text-based selector
-                        text = selector.replace('::-p-text(', '').rstrip(')')
+                        text = selector.replace('text=', '')
                         element = await self.page.wait_for_selector(f"text={text}", timeout=timeout)
-                    elif selector.startswith('::-p-aria('):
-                        # ARIA selector
-                        aria_label = selector.replace('::-p-aria(', '').rstrip(')')
-                        element = await self.page.wait_for_selector(f'[aria-label="{aria_label}"]', timeout=timeout)
                     else:
                         # CSS selector
                         element = await self.page.wait_for_selector(selector, timeout=timeout)
@@ -583,7 +836,7 @@ class TeraboxPlaywrightUploader:
                         await asyncio.sleep(1)
                         
                         # Click element
-                        await element.click(delay=100)  # 100ms delay untuk realism
+                        await element.click(delay=100)
                         
                         logger.info(f"✅ Clicked {description}")
                         await asyncio.sleep(2)
@@ -613,12 +866,9 @@ class TeraboxPlaywrightUploader:
                     # Handle different selector types
                     if selector.startswith('//'):
                         element = await self.page.wait_for_selector(f"xpath={selector}", timeout=timeout)
-                    elif selector.startswith('::-p-text('):
-                        text_sel = selector.replace('::-p-text(', '').rstrip(')')
+                    elif selector.startswith('text='):
+                        text_sel = selector.replace('text=', '')
                         element = await self.page.wait_for_selector(f"text={text_sel}", timeout=timeout)
-                    elif selector.startswith('::-p-aria('):
-                        aria_label = selector.replace('::-p-aria(', '').rstrip(')')
-                        element = await self.page.wait_for_selector(f'[aria-label="{aria_label}"]', timeout=timeout)
                     else:
                         element = await self.page.wait_for_selector(selector, timeout=timeout)
                     
@@ -632,7 +882,7 @@ class TeraboxPlaywrightUploader:
                         await asyncio.sleep(1)
                         
                         # Clear dan fill field
-                        await element.click(click_count=3)  # Triple click untuk select all
+                        await element.click(click_count=3)
                         await self.page.keyboard.press('Backspace')
                         await element.fill(text)
                         
@@ -703,7 +953,7 @@ class TeraboxPlaywrightUploader:
             login_success = await self.find_and_click_element([
                 'div.referral-content span',
                 '//*[@id="app"]/div[1]/div[2]/div[1]/div[2]/span',
-                '::-p-text(Log in)'
+                'text=Log in'
             ], "login button")
             
             if not login_success:
@@ -844,7 +1094,7 @@ class TeraboxPlaywrightUploader:
             folder_dialog_success = await self.find_and_click_element([
                 "span.upload-tips-path",
                 "//*[@id=\"upload-container\"]/div/div[2]/div/span[2]",
-                "::-p-text(Path)"
+                "text=Path"
             ], "folder path selector")
             
             if not folder_dialog_success:
@@ -857,7 +1107,7 @@ class TeraboxPlaywrightUploader:
             new_folder_success = await self.find_and_click_element([
                 "div.create-dir",
                 "//html/body/div[8]/div/div[2]/div[3]/div[1]",
-                "::-p-text(New Folder)"
+                "text=New Folder"
             ], "new folder button")
             
             if not new_folder_success:
@@ -926,340 +1176,6 @@ class TeraboxPlaywrightUploader:
                 pass
             return False
 
-    async def upload_all_files(self, folder_path: Path) -> List[str]:
-        """
-        Upload semua file sekaligus dari folder download ke Terabox
-        dengan membuat folder baru terlebih dahulu
-        """
-        try:
-            folder_name = folder_path.name
-            logger.info(f"📁 Memulai upload ke folder: {folder_name}")
-            
-            # Step 1: Buat folder baru di Terabox
-            if not await self.create_new_folder(folder_name):
-                logger.error("❌ Gagal membuat folder, melanjutkan upload ke root")
-                # Lanjutkan tanpa membuat folder
-            
-            # Dapatkan semua file dari folder
-            all_files = [f for f in folder_path.rglob('*') if f.is_file()]
-            total_files = len(all_files)
-            
-            logger.info(f"📁 Menemukan {total_files} file di {folder_path}")
-            
-            if total_files == 0:
-                logger.error("❌ Tidak ada file yang ditemukan untuk diupload")
-                return []
-
-            # Step 2: Klik tombol upload (Local file / Upload File)
-            logger.info("🖱️ Mencari dan mengklik tombol upload...")
-            
-            # Coba berbagai selector untuk tombol upload
-            upload_button_selectors = [
-                "div.source-arr > div:nth-of-type(1) div:nth-of-type(2)",  # Local file area
-                "div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img",  # Upload icon
-                "::-p-text(Upload File)",
-                "::-p-text(Local File)",
-                "div.local-item",  # Local file item
-            ]
-            
-            upload_clicked = False
-            for selector in upload_button_selectors:
-                try:
-                    await self.page.click(selector, timeout=10000)
-                    logger.info(f"✅ Berhasil klik tombol upload dengan selector: {selector}")
-                    upload_clicked = True
-                    break
-                except Exception as e:
-                    logger.debug(f"❌ Gagal klik dengan selector {selector}: {e}")
-                    continue
-            
-            if not upload_clicked:
-                logger.error("❌ Gagal menemukan tombol upload")
-                return []
-            
-            await asyncio.sleep(2)
-
-            # Step 3: Cari elemen input file yang mendukung multiple
-            logger.info("🔍 Mencari elemen input file...")
-            
-            input_selectors = [
-                "input[type='file'][multiple]",  # Prioritaskan input dengan multiple
-                "input[type='file']",
-                "input[webkitdirectory]",  # Untuk folder upload
-                "input[directory]",
-                "input#fileElem",
-                "div.source-arr input",
-                "input[accept]",
-                "input[name='file']"
-            ]
-            
-            file_input = None
-            for selector in input_selectors:
-                try:
-                    file_input = await self.page.query_selector(selector)
-                    if file_input:
-                        logger.info(f"✅ Found file input dengan selector: {selector}")
-                        
-                        # Cek apakah mendukung multiple
-                        is_multiple = await file_input.get_attribute("multiple")
-                        if is_multiple:
-                            logger.info("🎯 Input file mendukung multiple selection")
-                        else:
-                            logger.info("ℹ️ Input file tidak mendukung multiple selection")
-                        
-                        break
-                except Exception as e:
-                    logger.debug(f"❌ Selector {selector} gagal: {e}")
-                    continue
-            
-            if not file_input:
-                logger.error("❌ Tidak menemukan elemen input file")
-                await self.page.screenshot(path="upload_input_error.png")
-                return []
-
-            # Step 4: Upload semua file sekaligus
-            try:
-                logger.info(f"📤 Mengupload {total_files} file sekaligus...")
-                
-                # Konversi Path objects ke string paths
-                file_paths = [str(f.absolute()) for f in all_files]
-                
-                # Upload semua file sekaligus
-                await file_input.set_input_files(file_paths)
-                
-                logger.info(f"✅ Berhasil mengupload {total_files} file sekaligus")
-                await asyncio.sleep(5)
-                
-            except Exception as e:
-                logger.error(f"❌ Gagal upload semua file sekaligus: {e}")
-                logger.info("🔄 Mencoba upload file satu per satu...")
-                
-                # Fallback: upload file satu per satu
-                return await self.upload_files_individual(folder_path)
-
-            # Step 5: Tunggu upload selesai
-            logger.info("⏳ Menunggu proses upload selesai...")
-            await asyncio.sleep(10)
-            await self.wait_for_network_idle()
-
-            # Step 6: Klik Generate Link (sesuai recording)
-            generate_success = await self.find_and_click_element([
-                'div.share-way span',
-                '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[3]/div[1]/div[2]/div[2]/span',
-                '//*[contains(text(), "Generate Link")]',
-                'button:has-text("Generate Link")',
-                '.generate-link-btn'
-            ], "generate link button", timeout=60000)
-            
-            if not generate_success:
-                logger.error("❌ Could not click Generate Link")
-                return []
-            
-            # Wait for link generation
-            logger.info("⏳ Waiting for link generation...")
-            await asyncio.sleep(15)
-            await self.wait_for_network_idle()
-
-            # Step 7: Extract share links
-            links = await self.extract_share_links()
-            
-            if links:
-                logger.info(f"✅ Upload completed! {len(links)} links generated")
-            else:
-                logger.warning("⚠️ Upload completed but no links found")
-
-            return links
-
-        except Exception as e:
-            logger.error(f"❌ Gagal upload semua file: {e}")
-            try:
-                await self.page.screenshot(path="upload_all_files_error.png", full_page=True)
-                logger.info("📸 Saved upload error screenshot")
-            except:
-                pass
-            return []
-
-    async def upload_folder(self, folder_path: Path) -> List[str]:
-        """Upload entire folder to Terabox - prioritaskan upload semua file sekaligus dengan buat folder"""
-        try:
-            logger.info(f"📁 Starting folder upload dengan metode all files + buat folder: {folder_path}")
-            
-            # Coba metode upload semua file sekaligus dengan buat folder terlebih dahulu
-            links = await self.upload_all_files(folder_path)
-            
-            if links:
-                logger.info("✅ Metode upload semua file + buat folder berhasil!")
-                return links
-            
-            # Jika metode all files gagal, fallback ke metode individual
-            logger.warning("⚠️ Metode semua file gagal, fallback ke upload individual...")
-            return await self.upload_files_individual(folder_path)
-            
-        except Exception as e:
-            logger.error(f"💥 Folder upload error: {e}")
-            return await self.upload_files_individual(folder_path)
-
-    async def upload_files(self, folder_path: Path) -> List[str]:
-        """Upload files - prioritaskan upload semua file sekaligus dengan buat folder, lalu fallback ke individual"""
-        try:
-            logger.info(f"🔄 Starting upload process for folder: {folder_path}")
-            
-            # Cek jika folder berisi file yang valid
-            all_files = [f for f in folder_path.rglob('*') if f.is_file()]
-            if not all_files:
-                logger.error("❌ Folder is empty, nothing to upload")
-                return []
-            
-            # First try upload all files at once dengan buat folder
-            logger.info("📁 Attempting upload semua file sekaligus dengan buat folder...")
-            links = await self.upload_folder(folder_path)
-            
-            if links:
-                logger.info("✅ Upload semua file + buat folder berhasil!")
-                return links
-            
-            # Jika upload semua file gagal, try individual files
-            logger.info("📄 Upload semua file gagal, trying individual file upload...")
-            return await self.upload_files_individual(folder_path)
-            
-        except Exception as e:
-            logger.error(f"💥 Upload files error: {e}")
-            return []
-
-    async def upload_files_individual(self, folder_path: Path) -> List[str]:
-        """Upload files individually as fallback"""
-        try:
-            links = []
-            
-            # Get all files from folder
-            all_files = [f for f in folder_path.rglob('*') if f.is_file()]
-            
-            # Filter hanya file media (foto dan video)
-            media_files = [f for f in all_files if f.suffix.lower() in (PHOTO_EXTENSIONS | VIDEO_EXTENSIONS)]
-            
-            # Jika tidak ada file media, gunakan semua file
-            if not media_files:
-                media_files = all_files
-            
-            total_files = len(media_files)
-            
-            logger.info(f"📄 Found {total_files} media files for individual upload")
-            
-            if total_files == 0:
-                logger.error("❌ No media files found to upload")
-                return []
-            
-            # Buat folder baru terlebih dahulu (fallback method)
-            folder_name = folder_path.name
-            if not await self.create_new_folder(folder_name):
-                logger.warning("⚠️ Gagal membuat folder, melanjutkan upload ke root")
-            
-            # Upload semua file tanpa batasan
-            batch_files = media_files
-            
-            successful_uploads = 0
-            
-            for i, file_path in enumerate(batch_files, 1):
-                logger.info(f"📤 Uploading file {i}/{len(batch_files)}: {file_path.name}")
-                
-                if await self.upload_single_file(file_path, i, len(batch_files)):
-                    successful_uploads += 1
-                    logger.info(f"✅ Successfully uploaded: {file_path.name}")
-                    
-                    # Tunggu sebentar antara upload file
-                    if i < len(batch_files):
-                        await asyncio.sleep(3)
-                else:
-                    logger.error(f"❌ Failed to upload file: {file_path.name}")
-            
-            # Extract links setelah semua file diupload
-            if successful_uploads > 0:
-                links = await self.extract_share_links()
-                logger.info(f"📊 Individual upload completed: {successful_uploads}/{len(batch_files)} files uploaded, {len(links)} links generated")
-                
-                # Jika berhasil upload beberapa file, simpan session
-                await self.save_session()
-            else:
-                logger.error("❌ No files were successfully uploaded")
-            
-            return links
-            
-        except Exception as e:
-            logger.error(f"💥 Individual files upload error: {e}")
-            return []
-
-    async def upload_single_file(self, file_path: Path, current: int, total: int) -> bool:
-        """Upload single file dengan pendekatan yang lebih spesifik untuk Terabox"""
-        try:
-            logger.info(f"📤 Uploading file {current}/{total}: {file_path.name}")
-            
-            # Step 1: Klik tombol upload utama (sesuai recording)
-            await self.page.click("div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img", timeout=10000)
-            logger.info("🖱️ Klik tombol upload utama")
-            await asyncio.sleep(2)
-            
-            # Step 2: Cari input file (sesuai recording)
-            file_input = None
-            selectors = [
-                "div.share-main > div:nth-of-type(1) input:nth-of-type(1)",
-                "//*[@id=\"app\"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[1]/div[1]/div/input[1]",
-                "input[type='file']",
-                "input:nth-of-type(2)",
-                "input#fileElem"
-            ]
-            
-            for selector in selectors:
-                try:
-                    file_input = await self.page.query_selector(selector)
-                    if file_input:
-                        logger.info(f"✅ Found file input dengan selector: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"❌ Selector {selector} gagal: {e}")
-        
-            if not file_input:
-                logger.error("❌ Could not find file input element")
-                await self.page.screenshot(path="file_input_error.png")
-                return False
-            
-            # Step 3: Handle file upload
-            try:
-                await file_input.set_input_files(str(file_path.absolute()))
-                logger.info(f"✅ File sent to input: {file_path.name}")
-            except Exception as e:
-                logger.error(f"❌ Error setting file input: {e}")
-                return False
-            
-            # Wait for file upload to complete
-            logger.info("⏳ Waiting for file upload...")
-            await asyncio.sleep(10)
-            await self.wait_for_network_idle()
-            
-            # Step 4: Click Generate Link (sesuai recording)
-            generate_success = await self.find_and_click_element([
-                'div.share-way span',
-                '//*[@id="app"]/div[1]/div[2]/div[2]/div/div[2]/div/div[1]/div[3]/div[1]/div[2]/div[2]/span',
-                '//*[contains(text(), "Generate Link")]',
-                'button:has-text("Generate Link")',
-                '.generate-link-btn'
-            ], "generate link button", timeout=60000)
-            
-            if not generate_success:
-                logger.error("❌ Could not click Generate Link")
-                return False
-            
-            # Wait for link generation
-            logger.info("⏳ Waiting for link generation...")
-            await asyncio.sleep(12)
-            await self.wait_for_network_idle()
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"💥 Single file upload error: {e}")
-            await self.page.screenshot(path=f"upload_error_{current}.png")
-            return False
-
     async def extract_share_links(self) -> List[str]:
         """Extract sharing links dari halaman"""
         try:
@@ -1302,49 +1218,6 @@ class TeraboxPlaywrightUploader:
             logger.error(f"❌ Link extraction error: {e}")
             return []
 
-    async def upload_folder_via_playwright(self, folder_path: Path) -> List[str]:
-        """Main method untuk upload folder menggunakan Playwright dengan session persistence dan buat folder"""
-        try:
-            # Setup browser dengan session
-            if not await self.setup_browser(use_session=True):
-                logger.error("❌ Browser setup failed, cannot proceed with upload")
-                return []
-
-            logger.info(f"🚀 Starting Playwright upload for folder: {folder_path}")
-            
-            # Step 1: Check login status dan login jika diperlukan
-            if not await self.login_to_terabox():
-                logger.error("❌ Login failed, cannot proceed with upload")
-                return []
-            
-            # Step 2: Navigate to upload page
-            if not await self.navigate_to_upload_page():
-                logger.error("❌ Navigation to upload page failed")
-                return []
-            
-            # Step 3: Upload files (upload semua file sekaligus dengan buat folder first, then fallback to individual)
-            links = await self.upload_files(folder_path)
-            
-            if links:
-                logger.info(f"✅ Upload completed! {len(links)} links generated")
-                for i, link in enumerate(links, 1):
-                    logger.info(f"🔗 Link {i}: {link}")
-            else:
-                logger.warning("⚠️ Upload completed but no links found")
-            
-            return links
-                
-        except Exception as e:
-            logger.error(f"💥 Playwright upload error: {e}")
-            try:
-                await self.page.screenshot(path=f"error_{int(time.time())}.png")
-                logger.info("📸 Saved error screenshot")
-            except:
-                pass
-            return []
-        finally:
-            await self.cleanup_browser()
-
     async def cleanup_browser(self):
         """Cleanup browser dan resources"""
         try:
@@ -1360,63 +1233,6 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.warning(f"⚠️ Error closing browser: {e}")
 
-    def get_enhanced_manual_instructions(self, folder_path: Path, job_number: int) -> str:
-        """Generate enhanced manual instructions dengan fitur buat folder"""
-        file_count = len(list(folder_path.rglob('*')))
-        
-        instructions = f"""
-📋 **INSTRUKSI UPLOAD MANUAL TERABOX - Job #{job_number}**
-
-🎯 **Langkah-langkah Upload**:
-
-1. **Buka Website**: https://dm.1024tera.com/webmaster/index
-
-2. **Login**:
-   - Email: {self.terabox_email}
-   - Password: [tersembunyi]
-
-3. **Navigasi ke Upload**:
-   - Buka: https://dm.1024tera.com/webmaster/new/share
-
-4. **Buat Folder Baru**:
-   - Klik pada teks "Path" (di sebelah kanan atas area upload)
-   - Klik tombol "New Folder"
-   - Isi nama folder: `{folder_path.name}`
-   - Klik tombol centang (✓)
-   - Klik tombol "Confirm"
-
-5. **Upload File**:
-   - Klik tombol "Upload File" atau area upload
-   - Pilih semua file dari folder: `{folder_path}`
-   - Klik "Generate Link"
-
-6. **Copy Link**:
-   - Tunggu link generated
-   - Klik tombol copy
-   - Simpan link yang dihasilkan
-
-📁 **Detail Folder**:
-- Path: `{folder_path}`
-- Total Files: {file_count} files
-- Job ID: #{job_number}
-- Folder Terabox: {folder_path.name}
-
-🔧 **Jika Automation Gagal**:
-- Pastikan login berhasil manual terlebih dahulu
-- Cek koneksi internet
-- Verifikasi folder berisi file yang valid
-
-💡 **Tips**:
-- Gunakan Chrome browser versi terbaru
-- Matikan pop-up blocker
-- Allow file system permissions
-- Fitur buat folder otomatis sudah tersedia di automation
-"""
-        return instructions
-
-# [Kode UploadManager, DownloadProcessor, dan handlers tetap sama seperti sebelumnya]
-# ... (sisanya sama dengan kode asli)
-
 class UploadManager:
     def __init__(self):
         self.terabox_key = os.getenv('TERABOX_CONNECT_KEY')
@@ -1428,11 +1244,11 @@ class UploadManager:
         self._job_counter = 1
         self._counter_lock = threading.Lock()
         
-        logger.info("📤 UploadManager initialized dengan Playwright uploader + buat folder")
+        logger.info("📤 UploadManager initialized dengan Playwright uploader + upload semua file")
 
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox menggunakan Playwright automation dengan buat folder"""
-        logger.info(f"🚀 Starting Terabox upload dengan buat folder untuk job {job_id}, folder: {folder_path}")
+        """Upload files to Terabox menggunakan Playwright automation dengan upload semua file sekaligus"""
+        logger.info(f"🚀 Starting Terabox upload dengan upload semua file untuk job {job_id}, folder: {folder_path}")
         
         try:
             # Dapatkan nomor job
@@ -1444,43 +1260,43 @@ class UploadManager:
             
             await self.send_progress_message(
                 update, context, job_id, 
-                f"📤 Memulai upload ke Terabox...\n"
+                f"📤 MEMULAI UPLOAD KE TERABOX\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🎯 Method: Upload Semua File Sekaligus + Buat Folder"
+                f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS"
             )
 
             # Cek jika credential Terabox tersedia
             if not self.terabox_playwright_uploader.terabox_email or not self.terabox_playwright_uploader.terabox_password:
                 await self.send_progress_message(
                     update, context, job_id,
-                    "❌ Terabox credentials tidak ditemukan!\n"
+                    "❌ TERABOX CREDENTIALS TIDAK DITEMUKAN!\n"
                     "📋 Silakan set environment variables:\n"
                     "- TERABOX_EMAIL\n" 
                     "- TERABOX_PASSWORD"
                 )
                 return []
 
-            # Coba automation dengan Playwright + buat folder
+            # Upload menggunakan metode baru - upload semua file sekaligus
             await self.send_progress_message(
                 update, context, job_id,
-                "🔄 Mencoba login dan upload otomatis...\n"
-                "📝 Alur: Buat folder → Upload semua file sekaligus → Generate Link"
+                "🔄 PROSES UPLOAD OTOMATIS\n"
+                "📝 Alur: Login → Buat folder → Upload semua file → Generate Link"
             )
             
             with self.terabox_lock:
                 logger.info("🔒 Acquired Terabox upload lock")
                 
-                # Try Playwright automation dengan metode baru + buat folder
-                links = await self.terabox_playwright_uploader.upload_folder_via_playwright(folder_path)
+                # Panggil fungsi upload semua file sekaligus
+                links = await self.terabox_playwright_uploader.upload_all_files_to_terabox(folder_path, logger)
                 
                 if links:
                     success_msg = (
-                        f"✅ Upload ke Terabox berhasil!\n"
+                        f"✅ UPLOAD KE TERABOX BERHASIL!\n"
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
-                        f"🎯 Method: Upload Semua File + Buat Folder Otomatis"
+                        f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -1495,38 +1311,563 @@ class UploadManager:
                     
                     return links
                 else:
-                    # Fallback ke instruksi manual
-                    await self.send_progress_message(
-                        update, context, job_id,
-                        "⚠️ Upload otomatis tidak berhasil\n"
-                        "📋 Beralih ke mode manual dengan instruksi lengkap..."
+                    error_msg = (
+                        f"❌ UPLOAD OTOMATIS GAGAL\n"
+                        f"🔢 Job Number: #{job_number}\n"
+                        f"📁 Folder: {folder_path.name}\n"
+                        f"💡 Silakan coba manual upload"
                     )
-                    
-                    instructions = self.terabox_playwright_uploader.get_enhanced_manual_instructions(folder_path, job_number)
-                    await self.send_progress_message(update, context, job_id, instructions)
-                    
-                    return [f"Manual upload required - Job #{job_number}"]
+                    await self.send_progress_message(update, context, job_id, error_msg)
+                    return []
                     
         except Exception as e:
             logger.error(f"💥 Terabox upload error untuk {job_id}: {e}")
-            
-            # Berikan instruksi manual
-            with self._counter_lock:
-                job_number = self._job_counter - 1
-            
-            instructions = self.terabox_playwright_uploader.get_enhanced_manual_instructions(folder_path, job_number)
-            await self.send_progress_message(update, context, job_id, instructions)
-            
+            error_msg = f"❌ UPLOAD ERROR: {str(e)}"
+            await self.send_progress_message(update, context, job_id, error_msg)
             return []
 
-    # [Method lainnya tetap sama seperti sebelumnya]
-    # ... (sisanya sama dengan kode asli)
+    async def send_progress_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, message: str):
+        """Send progress message to user"""
+        try:
+            if job_id in active_downloads:
+                chat_id = active_downloads[job_id]['chat_id']
+                
+                # Update existing message or send new one
+                if job_id in user_progress_messages:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=user_progress_messages[job_id],
+                            text=message
+                        )
+                        return
+                    except Exception as e:
+                        logger.debug(f"Could not edit message: {e}")
+                
+                # Send new message
+                sent_message = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=message
+                )
+                user_progress_messages[job_id] = sent_message.message_id
+                
+        except Exception as e:
+            logger.error(f"Error sending progress message: {e}")
 
-# [Kode DownloadProcessor dan handlers tetap sama]
-# ... (sisanya sama dengan kode asli)
+class DownloadProcessor:
+    def __init__(self, mega_manager: MegaManager, file_manager: FileManager, upload_manager: UploadManager, settings_manager: UserSettingsManager):
+        self.mega_manager = mega_manager
+        self.file_manager = file_manager
+        self.upload_manager = upload_manager
+        self.settings_manager = settings_manager
+        self.processing = False
+        logger.info("📥 DownloadProcessor initialized")
+
+    def start_processing(self):
+        """Start processing download queue"""
+        if not self.processing:
+            self.processing = True
+            threading.Thread(target=self._process_queue, daemon=True).start()
+            logger.info("🔄 Download queue processor started")
+
+    def _process_queue(self):
+        """Process download queue in separate thread"""
+        while self.processing:
+            try:
+                if not download_queue.empty() and len(active_downloads) < MAX_CONCURRENT_DOWNLOADS:
+                    job_id, folder_url, user_id, chat_id = download_queue.get()
+                    
+                    # Start download in separate thread
+                    threading.Thread(
+                        target=self._process_download,
+                        args=(job_id, folder_url, user_id, chat_id),
+                        daemon=True
+                    ).start()
+                    
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Queue processing error: {e}")
+                time.sleep(5)
+
+    def _process_download(self, job_id: str, folder_url: str, user_id: int, chat_id: int):
+        """Process individual download"""
+        try:
+            # Get user settings
+            user_settings = self.settings_manager.get_user_settings(user_id)
+            
+            # Update active download status
+            active_downloads[job_id] = {
+                'status': DownloadStatus.DOWNLOADING,
+                'progress': 'Starting download...',
+                'start_time': datetime.now(),
+                'user_id': user_id,
+                'chat_id': chat_id,
+                'folder_url': folder_url,
+                'user_settings': user_settings
+            }
+            
+            # Generate download path
+            download_path = DOWNLOAD_BASE / f"download_{job_id}"
+            
+            # Download from Mega.nz
+            success, message = self.mega_manager.download_mega_folder(folder_url, download_path, job_id)
+            
+            if success:
+                active_downloads[job_id]['status'] = DownloadStatus.DOWNLOAD_COMPLETED
+                active_downloads[job_id]['progress'] = 'Download completed, starting upload...'
+                
+                # Auto rename if enabled
+                if user_settings.get('auto_rename', True):
+                    active_downloads[job_id]['status'] = DownloadStatus.RENAMING
+                    prefix = user_settings.get('prefix', 'file_')
+                    rename_result = self.file_manager.auto_rename_media_files(download_path, prefix)
+                    active_downloads[job_id]['progress'] = f'Renamed {rename_result["renamed"]}/{rename_result["total"]} files'
+                
+                # Auto upload if enabled
+                if user_settings.get('auto_upload', True):
+                    active_downloads[job_id]['status'] = DownloadStatus.UPLOADING
+                    
+                    # Run upload in asyncio thread
+                    asyncio.run(self._run_upload(job_id, download_path, user_id, chat_id))
+                else:
+                    active_downloads[job_id]['status'] = DownloadStatus.COMPLETED
+                    active_downloads[job_id]['progress'] = 'Download completed (upload disabled)'
+                    
+            else:
+                active_downloads[job_id]['status'] = DownloadStatus.ERROR
+                active_downloads[job_id]['progress'] = f'Download failed: {message}'
+                
+        except Exception as e:
+            logger.error(f"Download processing error for {job_id}: {e}")
+            active_downloads[job_id]['status'] = DownloadStatus.ERROR
+            active_downloads[job_id]['progress'] = f'Processing error: {str(e)}'
+
+    async def _run_upload(self, job_id: str, download_path: Path, user_id: int, chat_id: int):
+        """Run upload in asyncio context"""
+        try:
+            # Create mock update and context for upload
+            class MockUpdate:
+                def __init__(self, chat_id):
+                    self.effective_chat = type('Chat', (), {'id': chat_id})()
+            
+            class MockContext:
+                def __init__(self, chat_id):
+                    self.bot = type('Bot', (), {'send_message': self.send_message})()
+                    self.chat_id = chat_id
+                
+                async def send_message(self, chat_id, text):
+                    # This is a mock, real implementation would use actual bot
+                    logger.info(f"Mock message to {chat_id}: {text}")
+            
+            update = MockUpdate(chat_id)
+            context = MockContext(chat_id)
+            
+            # Perform upload
+            await self.upload_manager.upload_to_terabox(download_path, update, context, job_id)
+            
+            # Update status
+            active_downloads[job_id]['status'] = DownloadStatus.COMPLETED
+            active_downloads[job_id]['progress'] = 'Upload completed'
+            
+            # Auto cleanup if enabled
+            user_settings = self.settings_manager.get_user_settings(user_id)
+            if user_settings.get('auto_cleanup', True):
+                try:
+                    shutil.rmtree(download_path)
+                    logger.info(f"Cleaned up download folder: {download_path}")
+                except Exception as e:
+                    logger.error(f"Cleanup error: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Upload processing error for {job_id}: {e}")
+            active_downloads[job_id]['status'] = DownloadStatus.ERROR
+            active_downloads[job_id]['progress'] = f'Upload error: {str(e)}'
+
+# Telegram Bot Handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message when the command /start is issued."""
+    user = update.effective_user
+    welcome_text = f"""
+🤖 **Mega Downloader Bot dengan Upload Semua File**
+
+Halo {user.mention_html()}!
+
+Saya dapat membantu Anda:
+📥 Download folder dari Mega.nz
+📤 Upload otomatis ke Terabox
+🔄 Rename file secara otomatis
+
+**FITUR BARU**: Upload semua file sekaligus ke Terabox!
+
+**Perintah yang tersedia:**
+/download <url> - Download folder Mega.nz
+/upload <path> - Upload folder ke Terabox  
+/status - Lihat status download
+/setprefix <prefix> - Set prefix untuk rename
+/autoupload - Toggle auto upload
+/mysettings - Lihat pengaturan
+
+**Contoh:**
+/download https://mega.nz/folder/abc123
+    """
+    await update.message.reply_html(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message when the command /help is issued."""
+    help_text = """
+📖 **Bantuan Mega Downloader Bot**
+
+**Perintah:**
+/start - Memulai bot
+/download <url> - Download folder dari Mega.nz
+/upload <path> - Upload folder ke Terabox
+/status - Status download aktif
+/counterstatus - Status antrian
+/debug - Informasi debug
+/setprefix <prefix> - Set prefix rename file
+/setplatform <terabox|doodstream> - Set platform upload
+/autoupload <on|off> -Toggle auto upload
+/autocleanup <on|off> - Toggle auto cleanup
+/mysettings - Lihat pengaturan Anda
+/cleanup - Bersihkan folder download
+
+**Fitur Upload Baru:**
+✅ Upload semua file sekaligus
+✅ Buat folder otomatis di Terabox
+✅ Generate link otomatis
+✅ Fallback ke upload individual
+
+**Contoh:**
+/download https://mega.nz/folder/abc123
+/setprefix vacation_
+/autoupload on
+    """
+    await update.message.reply_text(help_text)
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /download command."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap berikan URL Mega.nz folder\n"
+                "Contoh: /download https://mega.nz/folder/abc123"
+            )
+            return
+
+        folder_url = context.args[0]
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        
+        # Validate Mega.nz URL
+        if not folder_url.startswith('https://mega.nz/'):
+            await update.message.reply_text(
+                "❌ URL Mega.nz tidak valid!\n"
+                "Format yang benar: https://mega.nz/folder/..."
+            )
+            return
+
+        # Generate job ID
+        job_id = str(uuid.uuid4())[:8]
+        
+        # Add to download queue
+        download_queue.put((job_id, folder_url, user_id, chat_id))
+        
+        # Get user settings
+        user_settings = settings_manager.get_user_settings(user_id)
+        
+        response_text = (
+            f"✅ **Download Ditambahkan ke Antrian**\n"
+            f"🆔 Job ID: `{job_id}`\n"
+            f"📁 URL: {folder_url}\n"
+            f"👤 User: {update.effective_user.first_name}\n"
+            f"⚙️ Auto Upload: {'✅' if user_settings.get('auto_upload', True) else '❌'}\n"
+            f"🔄 Auto Rename: {'✅' if user_settings.get('auto_rename', True) else '❌'}\n"
+            f"🧹 Auto Cleanup: {'✅' if user_settings.get('auto_cleanup', True) else '❌'}\n"
+            f"📊 Posisi Antrian: {download_queue.qsize()}\n"
+            f"\n**Fitur Baru**: Upload semua file sekaligus ke Terabox!"
+        )
+        
+        await update.message.reply_text(response_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Download command error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /upload command for manual upload"""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap berikan path folder\n"
+                "Contoh: /upload downloads/my_folder"
+            )
+            return
+
+        folder_path = Path(context.args[0])
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        
+        if not folder_path.exists():
+            await update.message.reply_text(
+                f"❌ Folder tidak ditemukan: {folder_path}"
+            )
+            return
+
+        # Generate job ID
+        job_id = f"upload_{str(uuid.uuid4())[:8]}"
+        
+        # Start upload
+        await upload_manager.upload_to_terabox(folder_path, update, context, job_id)
+        
+    except Exception as e:
+        logger.error(f"Upload command error: {e}")
+        await update.message.reply_text(f"❌ Upload error: {str(e)}")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /status command."""
+    try:
+        if not active_downloads:
+            await update.message.reply_text("📊 Tidak ada download aktif")
+            return
+
+        status_text = "📊 **Status Download Aktif:**\n\n"
+        
+        for job_id, info in active_downloads.items():
+            status_emoji = {
+                DownloadStatus.DOWNLOADING: "⏬",
+                DownloadStatus.DOWNLOAD_COMPLETED: "✅", 
+                DownloadStatus.RENAMING: "📝",
+                DownloadStatus.UPLOADING: "⏫",
+                DownloadStatus.COMPLETED: "🎉",
+                DownloadStatus.ERROR: "❌"
+            }.get(info['status'], '❓')
+            
+            status_text += (
+                f"{status_emoji} **Job {job_id}**\n"
+                f"Status: {info['status'].value}\n"
+                f"Progress: {info['progress']}\n"
+                f"Start: {info['start_time'].strftime('%H:%M:%S')}\n"
+                f"Platform: {info.get('user_settings', {}).get('platform', 'terabox')}\n"
+                f"\n"
+            )
+
+        await update.message.reply_text(status_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Status command error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /counterstatus command."""
+    try:
+        status_text = (
+            f"📊 **Status Sistem:**\n"
+            f"🔄 Download aktif: {len(active_downloads)}\n"
+            f"⏳ Dalam antrian: {download_queue.qsize()}\n"
+            f"✅ Selesai: {len(completed_downloads)}\n"
+            f"🚀 Max concurrent: {MAX_CONCURRENT_DOWNLOADS}\n"
+            f"📁 Base directory: {DOWNLOAD_BASE}\n"
+            f"🔧 Mega-get: {'✅' if mega_manager.check_mega_get() else '❌'}\n"
+            f"👤 Total users: {len(settings_manager.settings)}"
+        )
+        
+        await update.message.reply_text(status_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Counter status error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /debug command."""
+    try:
+        debug_info = mega_manager.debug_mega_session()
+        
+        debug_text = "🐛 **Debug Information:**\n\n"
+        
+        for key, value in debug_info.items():
+            if key == 'disk_space':
+                debug_text += f"💾 **Disk Space:**\n```{value}```\n"
+            elif key == 'error':
+                debug_text += f"❌ **Error:** {value}\n"
+            else:
+                debug_text += f"**{key.replace('_', ' ').title()}:** {value}\n"
+
+        await update.message.reply_text(debug_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Debug command error: {e}")
+        await update.message.reply_text(f"❌ Debug error: {str(e)}")
+
+async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setprefix command."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap berikan prefix\n"
+                "Contoh: /setprefix vacation_"
+            )
+            return
+
+        prefix = context.args[0]
+        user_id = update.effective_user.id
+        
+        settings_manager.update_user_settings(user_id, {'prefix': prefix})
+        
+        await update.message.reply_text(
+            f"✅ Prefix diubah menjadi: `{prefix}`\n"
+            f"File akan dinamai: `{prefix} 01.jpg`, `{prefix} 02.mp4`, dll."
+        )
+        
+    except Exception as e:
+        logger.error(f"Set prefix error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /setplatform command."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Harap berikan platform\n"
+                "Contoh: /setplatform terabox"
+            )
+            return
+
+        platform = context.args[0].lower()
+        
+        if platform not in ['terabox', 'doodstream']:
+            await update.message.reply_text(
+                "❌ Platform tidak valid!\n"
+                "Pilihan: terabox, doodstream"
+            )
+            return
+
+        user_id = update.effective_user.id
+        settings_manager.update_user_settings(user_id, {'platform': platform})
+        
+        await update.message.reply_text(f"✅ Platform diubah menjadi: {platform}")
+        
+    except Exception as e:
+        logger.error(f"Set platform error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /autoupload command."""
+    try:
+        user_id = update.effective_user.id
+        current_settings = settings_manager.get_user_settings(user_id)
+        current_auto_upload = current_settings.get('auto_upload', True)
+        
+        if context.args:
+            arg = context.args[0].lower()
+            if arg in ['on', 'true', '1', 'enable']:
+                new_setting = True
+            elif arg in ['off', 'false', '0', 'disable']:
+                new_setting = False
+            else:
+                await update.message.reply_text(
+                    "❌ Argument tidak valid!\n"
+                    "Gunakan: /autoupload on atau /autoupload off"
+                )
+                return
+        else:
+            # Toggle current setting
+            new_setting = not current_auto_upload
+        
+        settings_manager.update_user_settings(user_id, {'auto_upload': new_setting})
+        
+        status = "AKTIF ✅" if new_setting else "NONAKTIF ❌"
+        await update.message.reply_text(f"✅ Auto Upload: {status}")
+        
+    except Exception as e:
+        logger.error(f"Auto upload toggle error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /autocleanup command."""
+    try:
+        user_id = update.effective_user.id
+        current_settings = settings_manager.get_user_settings(user_id)
+        current_auto_cleanup = current_settings.get('auto_cleanup', True)
+        
+        if context.args:
+            arg = context.args[0].lower()
+            if arg in ['on', 'true', '1', 'enable']:
+                new_setting = True
+            elif arg in ['off', 'false', '0', 'disable']:
+                new_setting = False
+            else:
+                await update.message.reply_text(
+                    "❌ Argument tidak valid!\n"
+                    "Gunakan: /autocleanup on atau /autocleanup off"
+                )
+                return
+        else:
+            # Toggle current setting
+            new_setting = not current_auto_cleanup
+        
+        settings_manager.update_user_settings(user_id, {'auto_cleanup': new_setting})
+        
+        status = "AKTIF ✅" if new_setting else "NONAKTIF ❌"
+        await update.message.reply_text(f"✅ Auto Cleanup: {status}")
+        
+    except Exception as e:
+        logger.error(f"Auto cleanup toggle error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /mysettings command."""
+    try:
+        user_id = update.effective_user.id
+        user_settings = settings_manager.get_user_settings(user_id)
+        
+        settings_text = "⚙️ **Pengaturan Anda:**\n\n"
+        
+        for key, value in user_settings.items():
+            if isinstance(value, bool):
+                display_value = "✅ AKTIF" if value else "❌ NONAKTIF"
+            else:
+                display_value = value
+            
+            settings_text += f"**{key}:** {display_value}\n"
+        
+        settings_text += f"\n**Fitur Baru:** Upload semua file sekaligus ke Terabox!"
+
+        await update.message.reply_text(settings_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"My settings error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /cleanup command."""
+    try:
+        # Count files and folders before cleanup
+        initial_count = len(list(DOWNLOAD_BASE.rglob('*')))
+        
+        # Remove all download folders
+        for item in DOWNLOAD_BASE.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+                logger.info(f"Cleaned up: {item}")
+            elif item.is_file():
+                item.unlink()
+                logger.info(f"Removed file: {item}")
+        
+        # Count after cleanup
+        final_count = len(list(DOWNLOAD_BASE.rglob('*')))
+        
+        await update.message.reply_text(
+            f"🧹 **Cleanup Completed!**\n"
+            f"📁 Files cleaned: {initial_count - final_count}\n"
+            f"📊 Remaining: {final_count} files"
+        )
+        
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+        await update.message.reply_text(f"❌ Cleanup error: {str(e)}")
 
 # Initialize managers
-logger.info("🔄 Initializing managers dengan fitur buat folder Terabox...")
+logger.info("🔄 Initializing managers dengan fitur upload semua file...")
 settings_manager = UserSettingsManager()
 mega_manager = MegaManager()
 file_manager = FileManager()
@@ -1536,12 +1877,9 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 # Start download processor
 download_processor.start_processing()
 
-# [Telegram Bot Handlers tetap sama]
-# ... (sisanya sama dengan kode asli)
-
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Upload Semua File + Buat Folder Terabox...")
+    logger.info("🚀 Starting Mega Downloader Bot dengan Upload Semua File...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -1609,7 +1947,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan metode upload semua file + buat folder Terabox!")
+    logger.info("✅ Bot started successfully dengan metode UPLOAD SEMUA FILE SEKALIGUS!")
     application.run_polling()
 
 if __name__ == '__main__':
