@@ -835,152 +835,132 @@ class TeraboxPlaywrightUploader:
             logger.error(f"💥 Navigation process error: {e}")
             return False
 
-    async def upload_folder_new_method(self, folder_path: Path) -> List[str]:
+    async def upload_all_files(self, folder_path: Path) -> List[str]:
         """
-        Upload semua file dari folder download ke Terabox menggunakan metode baru yang lebih reliable
-        Alur: Klik tombol upload -> Add from local -> upload file satu per satu -> Continue adding -> Buat folder -> Generate Link
+        Upload semua file sekaligus dari folder download ke Terabox
+        Menggunakan metode multiple files upload dengan set_input_files([...])
         """
         try:
-            # Get all files from folder
+            # Dapatkan semua file dari folder
             all_files = [f for f in folder_path.rglob('*') if f.is_file()]
             total_files = len(all_files)
             
             logger.info(f"📁 Menemukan {total_files} file di {folder_path}")
+            
+            if total_files == 0:
+                logger.error("❌ Tidak ada file yang ditemukan untuk diupload")
+                return []
 
-            # Step 1: Klik tombol utama upload (ikon gambar)
-            await self.page.click("div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img", timeout=10000)
-            logger.info("🖱️ Klik tombol upload utama")
+            # Step 1: Klik tombol upload (Local file / Upload File)
+            logger.info("🖱️ Mencari dan mengklik tombol upload...")
+            
+            # Coba berbagai selector untuk tombol upload
+            upload_button_selectors = [
+                "div.source-arr > div:nth-of-type(1) div:nth-of-type(2)",  # Local file area
+                "div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img",  # Upload icon
+                "::-p-text(Upload File)",
+                "::-p-text(Local File)",
+                "div.local-item",  # Local file item
+            ]
+            
+            upload_clicked = False
+            for selector in upload_button_selectors:
+                try:
+                    await self.page.click(selector, timeout=10000)
+                    logger.info(f"✅ Berhasil klik tombol upload dengan selector: {selector}")
+                    upload_clicked = True
+                    break
+                except Exception as e:
+                    logger.debug(f"❌ Gagal klik dengan selector {selector}: {e}")
+                    continue
+            
+            if not upload_clicked:
+                logger.error("❌ Gagal menemukan tombol upload")
+                return []
+            
             await asyncio.sleep(2)
 
-            for i, file_path in enumerate(all_files, start=1):
-                logger.info(f"📤 Uploading file {i}/{total_files}: {file_path.name}")
-
-                # Step 2: Cari input upload file
-                input_el = await self.page.query_selector("div.share-main > div:nth-of-type(1) input:nth-of-type(1)")
-                if not input_el:
-                    raise Exception("❌ Tidak menemukan elemen input upload")
-
-                # Upload file
-                await input_el.set_input_files(str(file_path))
-                logger.info(f"✅ File dipilih: {file_path.name}")
-                await asyncio.sleep(3)
-
-                # Step 3: Jika masih ada file berikutnya → klik "Continue adding" lalu "Add from local"
-                if i < total_files:
-                    # Klik "Continue adding"
-                    continue_adding_success = await self.find_and_click_element([
-                        "div.file-list-bottom > span",
-                        "::-p-text(Continue adding)",
-                        "span:text('Continue adding')"
-                    ], "continue adding button", timeout=10000)
-                    
-                    if not continue_adding_success:
-                        logger.error("❌ Gagal klik Continue adding")
+            # Step 2: Cari elemen input file yang mendukung multiple
+            logger.info("🔍 Mencari elemen input file...")
+            
+            input_selectors = [
+                "input[type='file'][multiple]",  # Prioritaskan input dengan multiple
+                "input[type='file']",
+                "input[webkitdirectory]",  # Untuk folder upload
+                "input[directory]",
+                "input#fileElem",
+                "div.source-arr input",
+                "input[accept]",
+                "input[name='file']"
+            ]
+            
+            file_input = None
+            for selector in input_selectors:
+                try:
+                    file_input = await self.page.query_selector(selector)
+                    if file_input:
+                        logger.info(f"✅ Found file input dengan selector: {selector}")
+                        
+                        # Cek apakah mendukung multiple
+                        is_multiple = await file_input.get_attribute("multiple")
+                        if is_multiple:
+                            logger.info("🎯 Input file mendukung multiple selection")
+                        else:
+                            logger.info("ℹ️ Input file tidak mendukung multiple selection")
+                        
                         break
-                    
-                    await asyncio.sleep(2)
-                    
-                    # Klik "Add from local"
-                    add_from_local_success = await self.find_and_click_element([
-                        "div.local-btn-bottom > span",
-                        "::-p-text(Add from local)",
-                        "span:text('Add from local')"
-                    ], "add from local button", timeout=10000)
-                    
-                    if not add_from_local_success:
-                        logger.error("❌ Gagal klik Add from local")
-                        break
-                    
-                    await asyncio.sleep(2)
-
-            # Step 4: Setelah semua file dimasukkan → pilih lokasi penyimpanan
-            logger.info("📦 Semua file telah ditambahkan, memilih lokasi penyimpanan...")
+                except Exception as e:
+                    logger.debug(f"❌ Selector {selector} gagal: {e}")
+                    continue
             
-            # Klik elemen untuk pilih lokasi penyimpanan
-            location_success = await self.find_and_click_element([
-                "span.upload-tips-path",
-                "div.upload-tips-path",
-                ".upload-tips-path"
-            ], "storage location button", timeout=15000)
-            
-            if not location_success:
-                logger.error("❌ Gagal klik lokasi penyimpanan")
+            if not file_input:
+                logger.error("❌ Tidak menemukan elemen input file")
+                await self.page.screenshot(path="upload_input_error.png")
                 return []
 
-            await asyncio.sleep(2)
+            # Step 3: Upload semua file sekaligus
+            try:
+                logger.info(f"📤 Mengupload {total_files} file sekaligus...")
+                
+                # Konversi Path objects ke string paths
+                file_paths = [str(f.absolute()) for f in all_files]
+                
+                # Upload semua file sekaligus
+                await file_input.set_input_files(file_paths)
+                
+                logger.info(f"✅ Berhasil mengupload {total_files} file sekaligus")
+                await asyncio.sleep(5)
+                
+            except Exception as e:
+                logger.error(f"❌ Gagal upload semua file sekaligus: {e}")
+                logger.info("🔄 Mencoba upload file satu per satu...")
+                
+                # Fallback: upload file satu per satu
+                return await self.upload_files_individual(folder_path)
 
-            # Step 5: Klik tombol "New Folder"
-            new_folder_success = await self.find_and_click_element([
-                "div.create-dir",
-                "button:text('New Folder')",
-                "::-p-text(New Folder)"
-            ], "new folder button", timeout=10000)
-            
-            if not new_folder_success:
-                logger.error("❌ Gagal klik New Folder")
-                return []
-
-            await asyncio.sleep(2)
-
-            # Step 6: Isi nama folder (nama folder lokal)
-            folder_name = folder_path.name
-            folder_input_success = await self.find_and_fill_element([
-                "div.share-save input",
-                "input[placeholder*='folder']",
-                "input[type='text']"
-            ], "folder name input", folder_name, timeout=10000)
-            
-            if not folder_input_success:
-                logger.error("❌ Gagal mengisi nama folder")
-                return []
-
-            logger.info(f"📁 Membuat folder baru: {folder_name}")
-            await asyncio.sleep(1)
-
-            # Step 7: Klik commit dan konfirmasi
-            commit_success = await self.find_and_click_element([
-                "i.folder-name-commit",
-                "button:text('OK')",
-                "div.folder-name-commit"
-            ], "folder commit button", timeout=10000)
-            
-            if not commit_success:
-                logger.error("❌ Gagal klik commit folder")
-                return []
-
-            await asyncio.sleep(1)
-
-            confirm_success = await self.find_and_click_element([
-                "div.create-confirm",
-                "button:text('Confirm')",
-                "button:text('OK')"
-            ], "folder confirm button", timeout=10000)
-            
-            if not confirm_success:
-                logger.error("❌ Gagal klik confirm folder")
-                return []
-
-            logger.info("✅ Folder dibuat dan dipilih sebagai target upload")
-            await asyncio.sleep(3)
-
-            # Step 8: Klik "Generate Link"
-            generate_success = await self.find_and_click_element([
-                "div.share-way span",
-                "::-p-text(Generate Link)",
-                "button:text('Generate Link')"
-            ], "generate link button", timeout=20000)
-            
-            if not generate_success:
-                logger.error("❌ Gagal klik Generate Link")
-                return []
-
-            logger.info("🔗 Generate link selesai, menunggu link generated...")
-            
-            # Tunggu proses generate link selesai
+            # Step 4: Tunggu upload selesai
+            logger.info("⏳ Menunggu proses upload selesai...")
             await asyncio.sleep(10)
             await self.wait_for_network_idle()
 
-            # Step 9: Extract share links
+            # Step 5: Klik Generate Link
+            generate_success = await self.find_and_click_element([
+                'div.share-way span',
+                '//*[contains(text(), "Generate Link")]',
+                'button:has-text("Generate Link")',
+                '.generate-link-btn'
+            ], "generate link button", timeout=60000)
+            
+            if not generate_success:
+                logger.error("❌ Could not click Generate Link")
+                return []
+            
+            # Wait for link generation
+            logger.info("⏳ Waiting for link generation...")
+            await asyncio.sleep(15)
+            await self.wait_for_network_idle()
+
+            # Step 6: Extract share links
             links = await self.extract_share_links()
             
             if links:
@@ -991,28 +971,28 @@ class TeraboxPlaywrightUploader:
             return links
 
         except Exception as e:
-            logger.error(f"❌ Gagal upload folder dengan metode baru: {e}")
+            logger.error(f"❌ Gagal upload semua file: {e}")
             try:
-                await self.page.screenshot(path="upload_error_new_method.png", full_page=True)
+                await self.page.screenshot(path="upload_all_files_error.png", full_page=True)
                 logger.info("📸 Saved upload error screenshot")
             except:
                 pass
             return []
 
     async def upload_folder(self, folder_path: Path) -> List[str]:
-        """Upload entire folder to Terabox - gunakan metode baru sebagai primary"""
+        """Upload entire folder to Terabox - prioritaskan upload semua file sekaligus"""
         try:
-            logger.info(f"📁 Starting folder upload dengan metode baru: {folder_path}")
+            logger.info(f"📁 Starting folder upload dengan metode all files: {folder_path}")
             
-            # Coba metode baru terlebih dahulu
-            links = await self.upload_folder_new_method(folder_path)
+            # Coba metode upload semua file sekaligus terlebih dahulu
+            links = await self.upload_all_files(folder_path)
             
             if links:
-                logger.info("✅ Metode baru berhasil!")
+                logger.info("✅ Metode upload semua file berhasil!")
                 return links
             
-            # Jika metode baru gagal, fallback ke metode individual
-            logger.warning("⚠️ Metode baru gagal, fallback ke upload individual...")
+            # Jika metode all files gagal, fallback ke metode individual
+            logger.warning("⚠️ Metode semua file gagal, fallback ke upload individual...")
             return await self.upload_files_individual(folder_path)
             
         except Exception as e:
@@ -1020,7 +1000,7 @@ class TeraboxPlaywrightUploader:
             return await self.upload_files_individual(folder_path)
 
     async def upload_files(self, folder_path: Path) -> List[str]:
-        """Upload files - prioritaskan folder upload dengan metode baru, lalu fallback ke individual"""
+        """Upload files - prioritaskan upload semua file sekaligus, lalu fallback ke individual"""
         try:
             logger.info(f"🔄 Starting upload process for folder: {folder_path}")
             
@@ -1030,16 +1010,16 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Folder is empty, nothing to upload")
                 return []
             
-            # First try new folder upload method
-            logger.info("📁 Attempting new folder upload method...")
+            # First try upload all files at once
+            logger.info("📁 Attempting upload semua file sekaligus...")
             links = await self.upload_folder(folder_path)
             
             if links:
-                logger.info("✅ Folder upload successful!")
+                logger.info("✅ Upload semua file berhasil!")
                 return links
             
-            # Jika folder upload gagal, try individual files
-            logger.info("📄 Folder upload failed, trying individual file upload...")
+            # Jika upload semua file gagal, try individual files
+            logger.info("📄 Upload semua file gagal, trying individual file upload...")
             return await self.upload_files_individual(folder_path)
             
         except Exception as e:
@@ -1235,7 +1215,7 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Navigation to upload page failed")
                 return []
             
-            # Step 3: Upload files (folder upload first, then fallback to individual)
+            # Step 3: Upload files (upload semua file sekaligus first, then fallback to individual)
             links = await self.upload_files(folder_path)
             
             if links:
@@ -1351,7 +1331,7 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🎯 Method: Playwright dengan Metode Baru (File per File)"
+                f"🎯 Method: Upload Semua File Sekaligus"
             )
 
             # Cek jika credential Terabox tersedia
@@ -1368,8 +1348,8 @@ class UploadManager:
             # Coba automation dengan Playwright
             await self.send_progress_message(
                 update, context, job_id,
-                "🔄 Mencoba login dan upload otomatis dengan metode baru...\n"
-                "📝 Alur: Upload file satu per satu → Buat folder → Generate Link"
+                "🔄 Mencoba login dan upload otomatis...\n"
+                "📝 Alur: Upload semua file sekaligus → Generate Link"
             )
             
             with self.terabox_lock:
@@ -1384,7 +1364,7 @@ class UploadManager:
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
-                        f"🎯 Method: Automated dengan Metode Baru"
+                        f"🎯 Method: Upload Semua File Sekaligus"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -1724,7 +1704,7 @@ class DownloadProcessor:
                     update, context, job_id, 
                     f"📤 Uploading ke {platform}...\n"
                     f"🔢 Urutan Job: #{counter_status['current_job_counter']}\n"
-                    f"🎯 Menggunakan metode baru: Upload file per file"
+                    f"🎯 Menggunakan metode: Upload Semua File Sekaligus"
                 )
                 
                 if platform == 'terabox':
@@ -1823,7 +1803,7 @@ Saya adalah bot untuk mendownload folder dari Mega.nz dan menguploadnya ke berba
 Fitur:
 📥 Download folder dari Mega.nz
 🔄 Auto-rename file media  
-📤 Upload ke Terabox/Doodstream (Metode Baru yang Lebih Reliable)
+📤 Upload ke Terabox/Doodstream (Upload Semua File Sekaligus)
 ⚙️ Customizable settings
 
 Commands:
@@ -1859,12 +1839,10 @@ Pengaturan yang tersedia:
 - auto_cleanup: Hapus file lokal setelah upload
 
 Metode Upload Terbaru:
-🔄 Upload file satu per satu dengan alur:
-1. Klik tombol upload utama
-2. Upload file pertama
-3. Klik "Continue adding" untuk file berikutnya
-4. Buat folder baru dengan nama yang sama
-5. Generate link sharing
+🚀 Upload semua file sekaligus dengan alur:
+1. Klik tombol upload (Local file)
+2. Pilih semua file sekaligus (seperti Ctrl+A)
+3. Generate link sharing
 
 Contoh commands:
 /download https://mega.nz/folder/abc123
@@ -1943,7 +1921,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚙️ Pengaturan:\n"
             f"• Platform: {platform}\n"
             f"• Auto Upload: {'✅' if auto_upload else '❌'}\n"
-            f"• Method: Upload File per File\n\n"
+            f"• Method: Upload Semua File Sekaligus\n\n"
             f"Gunakan /status untuk memantau progress."
         )
         
@@ -2065,8 +2043,8 @@ Counter Info:
 🔒 Counter Locked: {'✅' if counter_status['counter_locked'] else '❌'}
 
 Upload Method:
-🤖 Playwright Automation dengan Metode Baru
-🎯 Alur: Upload file per file → Buat folder → Generate Link
+🤖 Playwright Automation dengan Upload Semua File Sekaligus
+🎯 Alur: Klik tombol upload → Pilih semua file → Generate Link
 🌐 URL: https://dm.1024tera.com/webmaster/new/share
 💡 Technology: Playwright dengan Chromium Headless + Session Cookies
         """
@@ -2104,7 +2082,7 @@ Bot Status:
 
 Terabox Status:
 🔢 Job Counter: {upload_manager.get_job_counter_status().get('current_job_counter', 0)}
-🤖 Upload Method: Playwright dengan Metode Baru
+🤖 Upload Method: Upload Semua File Sekaligus
 📧 Terabox Email: {'✅ Set' if terabox_email else '❌ Not Set'}
 🔑 Terabox Password: {'✅ Set' if terabox_password else '❌ Not Set'}
 💾 Session File: {'✅ Exists' if session_exists else '❌ Not Found'}
@@ -2289,7 +2267,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Metode Upload Baru...")
+    logger.info("🚀 Starting Mega Downloader Bot dengan Upload Semua File Sekaligus...")
     
     # Create base download directory
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -2357,7 +2335,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan metode upload baru!")
+    logger.info("✅ Bot started successfully dengan metode upload semua file sekaligus!")
     application.run_polling()
 
 if __name__ == '__main__':
