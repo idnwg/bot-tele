@@ -53,6 +53,7 @@ MAX_CONCURRENT_DOWNLOADS = 2
 download_queue = Queue()
 active_downloads: Dict[str, Dict] = {}
 completed_downloads: Dict[str, Dict] = {}
+cancelled_downloads: Dict[str, Dict] = {}
 user_settings = {}
 user_progress_messages = {}
 
@@ -64,6 +65,7 @@ class DownloadStatus(Enum):
     UPLOADING = "uploading"
     COMPLETED = "completed"
     ERROR = "error"
+    CANCELLED = "cancelled"
 
 class UserSettingsManager:
     def __init__(self):
@@ -113,6 +115,7 @@ class MegaManager:
         self.accounts = self.load_mega_accounts()
         self.current_account_index = 0
         self.mega_get_path = self._get_mega_get_path()
+        self.active_processes: Dict[str, subprocess.Popen] = {}
         logger.info(f"MegaManager initialized with {len(self.accounts)} accounts, mega-get path: {self.mega_get_path}")
     
     def _get_mega_get_path(self) -> str:
@@ -272,6 +275,36 @@ class MegaManager:
         except Exception as e:
             logger.error(f"💥 Error finding downloaded folder: {e}")
             return None
+
+    def stop_download(self, job_id: str) -> bool:
+        """Stop a running download process for the given job_id"""
+        try:
+            if job_id in self.active_processes:
+                process = self.active_processes[job_id]
+                logger.info(f"🛑 Attempting to stop download process for job {job_id}")
+                
+                # Terminate the process
+                process.terminate()
+                
+                # Wait for process to terminate
+                try:
+                    process.wait(timeout=10)
+                    logger.info(f"✅ Successfully stopped download process for job {job_id}")
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"⚠️ Process didn't terminate gracefully, killing for job {job_id}")
+                    process.kill()
+                    process.wait()
+                
+                # Remove from active processes
+                del self.active_processes[job_id]
+                return True
+            else:
+                logger.warning(f"⚠️ No active download process found for job {job_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"💥 Error stopping download for job {job_id}: {e}")
+            return False
     
     def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str]:
         """Download folder from Mega.nz using mega-get with detailed logging"""
@@ -309,31 +342,55 @@ class MegaManager:
                 logger.info(f"📂 Changed working directory to base: {DOWNLOAD_BASE}")
                 
                 try:
-                    # Now download using mega-get
+                    # Now download using mega-get dengan Popen agar bisa di-stop
                     download_cmd = [self.mega_get_path, folder_url]
                     logger.info(f"⚡ Executing download command: {' '.join(download_cmd)}")
                     
-                    # Execute download with longer timeout
+                    # Execute download dengan Popen untuk kontrol proses
                     start_time = time.time()
                     logger.info(f"⏰ Download started at: {datetime.now()}")
                     
-                    result = subprocess.run(download_cmd, capture_output=True, text=True, timeout=7200)  # 2 hours
+                    # Gunakan Popen agar bisa dihentikan
+                    process = subprocess.Popen(
+                        download_cmd, 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    
+                    # Simpan process reference untuk bisa di-stop
+                    self.active_processes[job_id] = process
+                    
+                    # Tunggu proses selesai dengan timeout
+                    try:
+                        stdout, stderr = process.communicate(timeout=7200)  # 2 hours
+                        return_code = process.returncode
+                    except subprocess.TimeoutExpired:
+                        # Jika timeout, terminate process
+                        process.terminate()
+                        stdout, stderr = process.communicate()
+                        return_code = process.returncode
+                        logger.error(f"⏰ Download timeout for {job_id} (2 hours)")
+                    
+                    # Hapus dari active processes setelah selesai
+                    if job_id in self.active_processes:
+                        del self.active_processes[job_id]
                     
                     end_time = time.time()
                     download_duration = end_time - start_time
                     logger.info(f"⏰ Download completed at: {datetime.now()}, duration: {download_duration:.2f}s")
                     
                     # Log command results
-                    logger.info(f"📊 Download command return code: {result.returncode}")
-                    logger.info(f"📤 Download stdout: {result.stdout}")
-                    if result.stderr:
-                        logger.warning(f"📥 Download stderr: {result.stderr}")
+                    logger.info(f"📊 Download command return code: {return_code}")
+                    logger.info(f"📤 Download stdout: {stdout}")
+                    if stderr:
+                        logger.warning(f"📥 Download stderr: {stderr}")
                     
                     # Return to original directory
                     os.chdir(original_cwd)
                     logger.info("📂 Returned to original working directory")
                     
-                    if result.returncode == 0:
+                    if return_code == 0:
                         # Wait for files to stabilize
                         logger.info("⏳ Waiting for files to stabilize...")
                         time.sleep(5)
@@ -381,7 +438,7 @@ class MegaManager:
                         
                         return True, success_msg
                     else:
-                        error_msg = result.stderr if result.stderr else result.stdout
+                        error_msg = stderr if stderr else stdout
                         logger.error(f"❌ Download command failed: {error_msg}")
                         
                         # Check for specific errors and handle them
@@ -401,12 +458,11 @@ class MegaManager:
                         else:
                             return False, f"Download failed: {error_msg}"
                             
-                except subprocess.TimeoutExpired:
-                    os.chdir(original_cwd)
-                    logger.error(f"⏰ Download timeout for {job_id} (2 hours)")
-                    return False, "Download timeout (2 hours)"
                 except Exception as e:
                     os.chdir(original_cwd)
+                    # Hapus dari active processes jika ada error
+                    if job_id in self.active_processes:
+                        del self.active_processes[job_id]
                     logger.error(f"💥 Unexpected error during download: {e}")
                     return False, f"Unexpected error: {str(e)}"
                     
@@ -995,7 +1051,7 @@ class TeraboxPlaywrightUploader:
                 "div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img",  # Upload icon
                 "::-p-text(Upload File)",
                 "::-p-text(Local File)",
-                "div.local-item",  # Local file item
+                "div.local-item",  # Local file item,
             ]
             
             upload_clicked = False
@@ -1695,6 +1751,16 @@ class DownloadProcessor:
             # Download from Mega.nz
             success, message = self.mega_manager.download_mega_folder(folder_url, download_path, job_id)
             
+            # Check if job was cancelled during download
+            if job_id not in active_downloads or active_downloads[job_id].get('status') == DownloadStatus.CANCELLED.value:
+                logger.info(f"🛑 Job {job_id} was cancelled during download")
+                if job_id in active_downloads:
+                    # Move to cancelled downloads
+                    cancelled_downloads[job_id] = active_downloads[job_id]
+                    cancelled_downloads[job_id]['end_time'] = datetime.now()
+                    del active_downloads[job_id]
+                return
+            
             if not success:
                 active_downloads[job_id].update({
                     'status': DownloadStatus.ERROR.value,
@@ -1846,11 +1912,12 @@ class DownloadProcessor:
             
         except Exception as e:
             logger.error(f"💥 Error in async download job: {e}")
-            active_downloads[job_id].update({
-                'status': DownloadStatus.ERROR.value,
-                'error': str(e),
-                'end_time': datetime.now()
-            })
+            if job_id in active_downloads:
+                active_downloads[job_id].update({
+                    'status': DownloadStatus.ERROR.value,
+                    'error': str(e),
+                    'end_time': datetime.now()
+                })
 
 # Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1864,14 +1931,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📝 Auto-rename file numbering
 📁 Buat folder otomatis di Terabox
 🧹 Auto-cleanup setelah selesai
+🛑 Stop proses yang berjalan
 
 **Perintah yang tersedia:**
 /download [url] - Download folder Mega.nz
 /upload [path] - Upload manual ke Terabox
 /status - Lihat status download
+/stop [job_id] - Hentikan proses download/upload
 /setprefix [nama] - Set prefix untuk rename
 /setplatform [terabox] - Set platform upload
-/autoupload [on/off] -Toggle auto upload
+/autoupload [on/off] - Toggle auto upload
 /autocleanup [on/off] - Toggle auto cleanup
 /mysettings - Lihat pengaturan Anda
 /cleanup - Bersihkan folder download
@@ -1879,6 +1948,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **Fitur Baru:**
 🎯 Buat folder otomatis di Terabox untuk setiap upload!
+🛑 Bisa stop proses yang sedang berjalan dengan /stop <job_id>
     """
     await update.message.reply_text(welcome_text)
 
@@ -1895,6 +1965,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Contoh: `/upload downloads/my_folder`
 
 3. **Cek Status**: `/status`
+
+4. **Stop Proses**: `/stop [job_id]`
+   Contoh: `/stop abc12345`
 
 **Pengaturan:**
 - `/setprefix [nama]` - Set nama prefix untuk file
@@ -1913,6 +1986,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - Bot akan otomatis membuat folder di Terabox dengan nama yang sama
 - File akan di-rename dengan format: `prefix 01.ext`
 - Download maksimal 2 folder bersamaan
+- Gunakan `/stop <job_id>` untuk menghentikan proses yang berjalan
     """
     await update.message.reply_text(help_text)
 
@@ -1957,7 +2031,8 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 Job ID: {job_id}\n"
             f"📥 URL: {folder_url[:50]}...\n"
             f"📊 Queue position: {download_queue.qsize()}\n"
-            f"⏳ Active downloads: {len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}"
+            f"⏳ Active downloads: {len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}\n"
+            f"🛑 Gunakan `/stop {job_id}` untuk membatalkan"
         )
         
     except Exception as e:
@@ -2005,8 +2080,8 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /status command."""
     try:
-        if not active_downloads and not completed_downloads:
-            await update.message.reply_text("📊 No active or completed downloads")
+        if not active_downloads and not completed_downloads and not cancelled_downloads:
+            await update.message.reply_text("📊 No active, completed, or cancelled downloads")
             return
         
         status_text = "📊 **Download Status**\n\n"
@@ -2015,7 +2090,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if active_downloads:
             status_text += "**🟢 Active Downloads:**\n"
             for job_id, info in list(active_downloads.items())[:5]:  # Show last 5
-                status_text += f"• {job_id}: {info['status']}\n"
+                status_text += f"• `{job_id}`: {info['status']}"
+                if 'folder_url' in info:
+                    status_text += f" - {info['folder_url'][:30]}..."
+                elif 'folder_path' in info:
+                    status_text += f" - {Path(info['folder_path']).name}"
+                status_text += f" - /stop_{job_id}\n"
         else:
             status_text += "**🔴 No active downloads**\n"
         
@@ -2025,12 +2105,121 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Recent completed
         if completed_downloads:
-            status_text += f"\n**✅ Completed:** {len(completed_downloads)} jobs"
+            completed_count = len(completed_downloads)
+            status_text += f"\n**✅ Completed:** {completed_count} jobs"
+            if completed_count > 0:
+                latest_job = list(completed_downloads.keys())[-1]
+                status_text += f" (Latest: `{latest_job}`)"
+        
+        # Recent cancelled
+        if cancelled_downloads:
+            cancelled_count = len(cancelled_downloads)
+            status_text += f"\n**🟡 Cancelled:** {cancelled_count} jobs"
+        
+        status_text += f"\n\n**🛑 Usage:** `/stop job_id` to stop a process"
         
         await update.message.reply_text(status_text)
         
     except Exception as e:
         logger.error(f"Error in status command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /stop command to cancel a running job."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please provide a job ID\n"
+                "Contoh: /stop abc12345\n"
+                "Gunakan /status untuk melihat job ID yang aktif"
+            )
+            return
+        
+        job_id = context.args[0]
+        
+        # Check if job exists in active downloads
+        if job_id not in active_downloads:
+            await update.message.reply_text(
+                f"❌ Job ID `{job_id}` tidak ditemukan dalam proses aktif!\n"
+                f"Gunakan /status untuk melihat job yang sedang berjalan"
+            )
+            return
+        
+        job_info = active_downloads[job_id]
+        current_status = job_info['status']
+        
+        # Cancel the job based on its current status
+        if current_status in [DownloadStatus.DOWNLOADING.value, DownloadStatus.PENDING.value]:
+            # Stop download process
+            success = mega_manager.stop_download(job_id)
+            
+            if success or current_status == DownloadStatus.PENDING.value:
+                # Remove from queue if pending
+                if current_status == DownloadStatus.PENDING.value:
+                    # Create a temporary queue to filter out the cancelled job
+                    temp_queue = Queue()
+                    while not download_queue.empty():
+                        q_job_id, q_folder_url, q_update, q_context = download_queue.get()
+                        if q_job_id != job_id:
+                            temp_queue.put((q_job_id, q_folder_url, q_update, q_context))
+                    
+                    # Replace the original queue
+                    while not temp_queue.empty():
+                        download_queue.put(temp_queue.get())
+                
+                # Update status to cancelled
+                active_downloads[job_id]['status'] = DownloadStatus.CANCELLED.value
+                active_downloads[job_id]['end_time'] = datetime.now()
+                
+                # Move to cancelled downloads
+                cancelled_downloads[job_id] = active_downloads[job_id]
+                del active_downloads[job_id]
+                
+                await update.message.reply_text(
+                    f"✅ Job `{job_id}` berhasil dihentikan!\n"
+                    f"📛 Status: {current_status} → cancelled\n"
+                    f"⏰ Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                
+                # Send progress message if exists
+                if job_id in user_progress_messages:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=job_info['chat_id'],
+                            text=f"🛑 Job `{job_id}` telah dihentikan oleh user!"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not send cancellation message: {e}")
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Gagal menghentikan download untuk job `{job_id}`\n"
+                    f"Proses mungkin sudah selesai atau sedang dalam tahap lain"
+                )
+        
+        elif current_status == DownloadStatus.UPLOADING.value:
+            # For uploads, we can't easily stop Playwright, so we mark as cancelled
+            # and let it finish but skip further processing
+            active_downloads[job_id]['status'] = DownloadStatus.CANCELLED.value
+            active_downloads[job_id]['end_time'] = datetime.now()
+            
+            # Move to cancelled downloads
+            cancelled_downloads[job_id] = active_downloads[job_id]
+            del active_downloads[job_id]
+            
+            await update.message.reply_text(
+                f"✅ Upload job `{job_id}` ditandai untuk dibatalkan!\n"
+                f"📛 Proses upload akan berhenti setelah tahap saat ini selesai\n"
+                f"⏰ Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        
+        else:
+            await update.message.reply_text(
+                f"⚠️ Job `{job_id}` sedang dalam status `{current_status}`\n"
+                f"Tidak dapat dihentikan pada tahap ini"
+            )
+        
+    except Exception as e:
+        logger.error(f"Error in stop command: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2040,6 +2229,7 @@ async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_T
         status_text += f"**📥 Download Queue:** {download_queue.qsize()}\n"
         status_text += f"**⚡ Active Downloads:** {len(active_downloads)}\n"
         status_text += f"**✅ Completed Downloads:** {len(completed_downloads)}\n"
+        status_text += f"**🟡 Cancelled Downloads:** {len(cancelled_downloads)}\n"
         status_text += f"**🔢 Next Job Number:** #{upload_manager._job_counter}\n"
         status_text += f"**👥 User Settings:** {len(settings_manager.settings)} users"
         
@@ -2072,6 +2262,9 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Downloads directory
         debug_text += f"**Downloads Writable:** {debug_info.get('downloads_writable', False)}\n"
+        
+        # Active processes
+        debug_text += f"**Active Processes:** {len(mega_manager.active_processes)}\n"
         
         await update.message.reply_text(debug_text)
         
@@ -2271,7 +2464,7 @@ download_processor.start_processing()
 
 def main():
     """Start the bot"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Upload Semua File + Buat Folder Terabox...")
+    logger.info("🚀 Starting Mega Downloader Bot dengan Upload Semua File + Buat Folder Terabox + Stop Feature...")
     
     # Create base download directory dengan path absolut
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -2333,6 +2526,7 @@ def main():
     application.add_handler(CommandHandler("download", download_command))
     application.add_handler(CommandHandler("upload", upload_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("counterstatus", counter_status_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("setprefix", set_prefix))
@@ -2343,7 +2537,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan metode upload semua file + buat folder Terabox!")
+    logger.info("✅ Bot started successfully dengan metode upload semua file + buat folder Terabox + stop feature!")
     application.run_polling()
 
 if __name__ == '__main__':
