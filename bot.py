@@ -100,7 +100,8 @@ class UserSettingsManager:
                 'prefix': 'file_',
                 'platform': 'terabox',
                 'auto_upload': True,
-                'auto_cleanup': True
+                'auto_cleanup': True,
+                'auto_rename': True
             }
             self.save_settings()
         return self.settings[user_str]
@@ -573,6 +574,26 @@ class FileManager:
         except Exception as e:
             logger.error(f"💥 Error in auto_rename: {e}")
             return {'renamed': 0, 'total': 0}
+
+    @staticmethod
+    def rename_folder(old_folder_name: str, new_folder_name: str) -> Tuple[bool, str]:
+        """Rename folder inside DOWNLOAD_BASE"""
+        try:
+            old_path = DOWNLOAD_BASE / old_folder_name
+            new_path = DOWNLOAD_BASE / new_folder_name
+
+            if not old_path.exists():
+                return False, f"Folder '{old_folder_name}' tidak ditemukan"
+            
+            if new_path.exists():
+                return False, f"Folder '{new_folder_name}' sudah ada"
+            
+            old_path.rename(new_path)
+            logger.info(f"✅ Folder renamed: {old_folder_name} -> {new_folder_name}")
+            return True, f"Folder berhasil direname: {new_folder_name}"
+        except Exception as e:
+            logger.error(f"❌ Error renaming folder: {e}")
+            return False, f"Error: {str(e)}"
 
 class TeraboxPlaywrightUploader:
     def __init__(self):
@@ -1801,6 +1822,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📥 Download folder dari Mega.nz
 📤 Upload otomatis ke Terabox  
 📝 Auto-rename file numbering
+✏️ Rename folder manual
 📁 Buat folder otomatis di Terabox
 🛡️ ANTI-DUPLIKASI file upload
 📁 Upload by folder name
@@ -1810,12 +1832,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **Perintah yang tersedia:**
 /download [url] - Download folder Mega.nz
 /upload [nama_folder] - Upload folder yang sudah didownload
+/rename <old_name> <new_name> - Rename folder hasil download
 /listfolders - Lihat daftar folder yang sudah didownload
 /status - Lihat status download
 /stop [job_id] - Hentikan proses download/upload
 /setprefix [nama] - Set prefix untuk rename
 /setplatform [terabox] - Set platform upload
 /autoupload [on/off] - Toggle auto upload
+/autorename [on/off] - Toggle auto rename
 /autocleanup [on/off] - Toggle auto cleanup
 /mysettings - Lihat pengaturan Anda
 /cleanup - Bersihkan folder download
@@ -1825,6 +1849,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎯 Upload by folder name: /upload nama_folder
 🛡️ Anti-duplikasi: File tidak akan terupload double
 📋 List folders: /listfolders untuk melihat folder tersedia
+✏️ Rename folder: /rename old_name new_name
     """
     await update.message.reply_text(welcome_text)
 
@@ -1841,17 +1866,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    Contoh: `/upload my_downloaded_folder`
    Gunakan `/listfolders` untuk melihat folder tersedia
 
-3. **List Folders**: `/listfolders`
+3. **Rename Folder**: `/rename <nama_folder_lama> <nama_folder_baru>`
+   Contoh: `/rename download_abc123 my_new_folder`
 
-4. **Cek Status**: `/status`
+4. **List Folders**: `/listfolders`
 
-5. **Stop Proses**: `/stop [job_id]`
+5. **Cek Status**: `/status`
+
+6. **Stop Proses**: `/stop [job_id]`
    Contoh: `/stop abc12345`
 
 **Pengaturan:**
 - `/setprefix [nama]` - Set nama prefix untuk file
 - `/setplatform [terabox]` - Set platform upload  
 - `/autoupload [on/off]` - Enable/disable auto upload
+- `/autorename [on/off]` - Enable/disable auto rename
 - `/autocleanup [on/off]` - Enable/disable auto cleanup
 - `/mysettings` - Lihat pengaturan Anda
 
@@ -1868,6 +1897,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - Download maksimal 2 folder bersamaan
 - Gunakan `/stop <job_id>` untuk menghentikan proses yang berjalan
 - Fitur anti-duplikasi mencegah file terupload double
+- Gunakan `/rename` untuk merename folder jika download gagal sebagian
     """
     await update.message.reply_text(help_text)
 
@@ -2022,17 +2052,47 @@ async def list_folders_command(update: Update, context: ContextTypes.DEFAULT_TYP
             folder_list += f"**{i}. {folder['name']}**\n"
             folder_list += f"   📄 {folder['file_count']} files | 💾 {size_mb:.1f} MB\n"
             folder_list += f"   🕒 {created_time}\n"
-            folder_list += f"   📤 Upload: `/upload {folder['name']}`\n\n"
+            folder_list += f"   📤 Upload: `/upload {folder['name']}`\n"
+            folder_list += f"   ✏️ Rename: `/rename {folder['name']} new_name`\n\n"
         
         if len(folders) > 15:
             folder_list += f"📊 ... and {len(folders) - 15} more folders\n\n"
         
-        folder_list += "💡 **Usage:** `/upload folder_name` to upload specific folder"
+        folder_list += "💡 **Usage:**\n- `/upload folder_name` untuk upload\n- `/rename old_name new_name` untuk rename"
         
         await update.message.reply_text(folder_list)
         
     except Exception as e:
         logger.error(f"Error in list_folders command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /rename command to rename downloaded folders."""
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "❌ Format perintah: /rename <nama_folder_lama> <nama_folder_baru>\n"
+                "Contoh: /rename download_abc123 my_new_folder\n\n"
+                "💡 Gunakan /listfolders untuk melihat folder yang tersedia"
+            )
+            return
+
+        old_name = context.args[0]
+        new_name = context.args[1]
+
+        success, message = FileManager.rename_folder(old_name, new_name)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ {message}\n\n"
+                f"📁 Folder berhasil direname!\n"
+                f"📤 Sekarang bisa diupload dengan: /upload {new_name}"
+            )
+        else:
+            await update.message.reply_text(f"❌ {message}")
+
+    except Exception as e:
+        logger.error(f"Error in rename command: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2080,6 +2140,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         status_text += f"\n\n**🛑 Usage:** `/stop job_id` to stop a process"
         status_text += f"\n**📁 Usage:** `/listfolders` to see downloaded folders"
+        status_text += f"\n**✏️ Usage:** `/rename old_name new_name` to rename folders"
         
         await update.message.reply_text(status_text)
         
@@ -2333,6 +2394,41 @@ async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error in auto_upload_toggle: {e}")
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
+async def auto_rename_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle auto-rename feature."""
+    try:
+        if not context.args:
+            # Show current status
+            user_id = update.effective_user.id
+            user_settings = settings_manager.get_user_settings(user_id)
+            auto_rename = user_settings.get('auto_rename', True)
+            
+            status = "ON" if auto_rename else "OFF"
+            await update.message.reply_text(
+                f"✏️ Auto-rename status: {status}\n"
+                f"Gunakan: /autorename on atau /autorename off"
+            )
+            return
+        
+        toggle = context.args[0].lower()
+        
+        if toggle not in ['on', 'off']:
+            await update.message.reply_text(
+                "❌ Invalid option. Use: /autorename on atau /autorename off"
+            )
+            return
+        
+        user_id = update.effective_user.id
+        auto_rename = toggle == 'on'
+        settings_manager.update_user_settings(user_id, {'auto_rename': auto_rename})
+        
+        status = "ON" if auto_rename else "OFF"
+        await update.message.reply_text(f"✅ Auto-rename: {status}")
+        
+    except Exception as e:
+        logger.error(f"Error in auto_rename_toggle: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
 async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle auto-cleanup feature."""
     try:
@@ -2378,6 +2474,7 @@ async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_text += f"**📝 Prefix:** {user_settings.get('prefix', 'file_')}\n"
         settings_text += f"**📤 Platform:** {user_settings.get('platform', 'terabox')}\n"
         settings_text += f"**🔄 Auto-upload:** {'ON' if user_settings.get('auto_upload', True) else 'OFF'}\n"
+        settings_text += f"**✏️ Auto-rename:** {'ON' if user_settings.get('auto_rename', True) else 'OFF'}\n"
         settings_text += f"**🧹 Auto-cleanup:** {'ON' if user_settings.get('auto_cleanup', True) else 'OFF'}\n"
         
         await update.message.reply_text(settings_text)
@@ -2496,6 +2593,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("download", download_command))
     application.add_handler(CommandHandler("upload", upload_command))
+    application.add_handler(CommandHandler("rename", rename_command))
     application.add_handler(CommandHandler("listfolders", list_folders_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("stop", stop_command))
@@ -2504,6 +2602,7 @@ def main():
     application.add_handler(CommandHandler("setprefix", set_prefix))
     application.add_handler(CommandHandler("setplatform", set_platform))
     application.add_handler(CommandHandler("autoupload", auto_upload_toggle))
+    application.add_handler(CommandHandler("autorename", auto_rename_toggle))
     application.add_handler(CommandHandler("autocleanup", auto_cleanup_toggle))
     application.add_handler(CommandHandler("mysettings", my_settings))
     application.add_handler(CommandHandler("cleanup", cleanup_command))
