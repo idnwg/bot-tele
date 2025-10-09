@@ -43,10 +43,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants
+# Constants - UPDATE PATH KE LOKASI BARU
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.mpeg'}
-DOWNLOAD_BASE = Path('/root/bot-tele/downloads')  # Path absolut
+DOWNLOAD_BASE = Path('/home/ubuntu/bot-tele/downloads')  # PATH BARU YANG DIPERBAIKI
 MAX_CONCURRENT_DOWNLOADS = 2
 MAX_UPLOAD_RETRIES = 3
 UPLOAD_BATCH_SIZE = 10  # Batasi jumlah file per batch
@@ -71,7 +71,7 @@ class DownloadStatus(Enum):
 
 class UserSettingsManager:
     def __init__(self):
-        self.settings_file = 'user_settings.json'
+        self.settings_file = '/home/ubuntu/bot-tele/user_settings.json'  # PATH BARU
         self.settings = self.load_settings()
     
     def load_settings(self) -> Dict:
@@ -84,6 +84,8 @@ class UserSettingsManager:
     
     def save_settings(self):
         try:
+            # Pastikan directory exists
+            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
             with open(self.settings_file, 'w') as f:
                 json.dump(self.settings, f, indent=4)
             logger.info("User settings saved successfully")
@@ -113,7 +115,7 @@ class UserSettingsManager:
 
 class MegaManager:
     def __init__(self):
-        self.cred_file = 'mega_session.json'
+        self.cred_file = '/home/ubuntu/bot-tele/mega_session.json'  # PATH BARU
         self.accounts = self.load_mega_accounts()
         self.current_account_index = 0
         self.mega_get_path = self._get_mega_get_path()
@@ -146,9 +148,10 @@ class MegaManager:
         """Load mega accounts from environment variables"""
         accounts = []
         
-        # Try to load from mega_accounts.json first
+        # Try to load from mega_accounts.json first - PATH BARU
         try:
-            with open('mega_accounts.json', 'r') as f:
+            mega_accounts_file = '/home/ubuntu/bot-tele/mega_accounts.json'
+            with open(mega_accounts_file, 'r') as f:
                 file_accounts = json.load(f)
                 if isinstance(file_accounts, list):
                     accounts.extend(file_accounts)
@@ -580,7 +583,7 @@ class TeraboxPlaywrightUploader:
         self.terabox_email = os.getenv('TERABOX_EMAIL')
         self.terabox_password = os.getenv('TERABOX_PASSWORD')
         self.current_domain = None
-        self.session_file = "terabox_session.json"
+        self.session_file = "/home/ubuntu/bot-tele/terabox_session.json"  # PATH BARU
         self.timeout = 45000  # 45 seconds in milliseconds
         self.uploaded_files_tracker = set()  # Track files yang sudah diupload
         logger.info("🌐 TeraboxPlaywrightUploader initialized dengan session persistence + anti-duplikasi")
@@ -669,6 +672,8 @@ class TeraboxPlaywrightUploader:
         """Save session cookies untuk penggunaan berikutnya"""
         try:
             storage_state = await self.context.storage_state()
+            # Pastikan directory exists
+            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
             with open(self.session_file, 'w') as f:
                 json.dump(storage_state, f)
             logger.info("💾 Session saved successfully")
@@ -893,7 +898,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Login error: {e}")
             try:
-                await self.page.screenshot(path="login_error.png")
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/login_error.png")  # PATH BARU
                 logger.info("📸 Saved login error screenshot")
             except:
                 pass
@@ -998,7 +1003,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Error creating folder {folder_name}: {e}")
             try:
-                await self.page.screenshot(path=f"create_folder_error_{folder_name}.png")
+                await self.page.screenshot(path=f"/home/ubuntu/bot-tele/create_folder_error_{folder_name}.png")  # PATH BARU
                 logger.info("📸 Saved create folder error screenshot")
             except:
                 pass
@@ -1048,7 +1053,7 @@ class TeraboxPlaywrightUploader:
             
             if not file_input:
                 logger.error("❌ Tidak menemukan elemen input file")
-                await self.page.screenshot(path="upload_input_error.png")
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_input_error.png")  # PATH BARU
                 return []
 
             # Step 4: Upload semua file sekaligus dengan anti-duplikasi
@@ -1102,7 +1107,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"❌ Gagal upload semua file: {e}")
             try:
-                await self.page.screenshot(path="upload_all_files_error.png", full_page=True)
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_all_files_error.png", full_page=True)  # PATH BARU
                 logger.info("📸 Saved upload error screenshot")
             except:
                 pass
@@ -1239,7 +1244,7 @@ class TeraboxPlaywrightUploader:
             
             # Save screenshot untuk debugging
             try:
-                await self.page.screenshot(path="upload_result.png")
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_result.png")  # PATH BARU
                 logger.info("📸 Saved upload result screenshot")
             except:
                 pass
@@ -1293,7 +1298,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Playwright upload error: {e}")
             try:
-                await self.page.screenshot(path=f"error_{int(time.time())}.png")
+                await self.page.screenshot(path=f"/home/ubuntu/bot-tele/error_{int(time.time())}.png")  # PATH BARU
                 logger.info("📸 Saved error screenshot")
             except:
                 pass
@@ -2418,7 +2423,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Cleanup error: {str(e)}")
 
 # Initialize managers
-logger.info("🔄 Initializing managers dengan fitur Upload by Folder Name + Anti-Duplikasi...")
+logger.info("🔄 Initializing managers dengan path baru /home/ubuntu/bot-tele...")
 settings_manager = UserSettingsManager()
 mega_manager = MegaManager()
 file_manager = FileManager()
@@ -2429,10 +2434,10 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 download_processor.start_processing()
 
 def main():
-    """Start the bot dengan fitur lengkap"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan Fitur Upload by Folder Name + Anti-Duplikasi...")
+    """Start the bot dengan path baru"""
+    logger.info("🚀 Starting Mega Downloader Bot dengan path baru /home/ubuntu/bot-tele...")
     
-    # Create base download directory dengan path absolut
+    # Create base download directory dengan path baru
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
     logger.info(f"📁 Base download directory: {DOWNLOAD_BASE}")
     
@@ -2462,7 +2467,7 @@ def main():
         logger.info("✅ Terabox credentials found")
     
     # Check session file
-    session_exists = os.path.exists('terabox_session.json')
+    session_exists = os.path.exists('/home/ubuntu/bot-tele/terabox_session.json')
     if session_exists:
         logger.info("✅ Terabox session file found - will use existing session")
     else:
@@ -2504,7 +2509,7 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan metode upload semua file + buat folder Terabox + stop feature + upload by folder name + anti-duplikasi!")
+    logger.info("✅ Bot started successfully dengan path baru /home/ubuntu/bot-tele!")
     application.run_polling()
 
 if __name__ == '__main__':
