@@ -828,116 +828,250 @@ class TeraboxPlaywrightUploader:
             return False
 
     async def login_to_terabox(self) -> bool:
-        """Login ke Terabox hanya jika diperlukan - DIPERBAIKI UNTUK EMAIL LOGIN METHOD"""
+        """Login ke Terabox hanya jika diperlukan - SOLUSI KOMPREHENSIF UNTUK EMAIL LOGIN"""
         try:
             # Cek dulu apakah sudah login
             if await self.check_if_logged_in():
                 logger.info("✅ Already logged in, skipping login process")
                 return True
             
-            logger.info("🔐 Login required, starting login process...")
+            logger.info("🔐 Login required, starting comprehensive login process...")
             
             # Step 1: Navigate to login page
             await self.page.goto('https://www.1024tera.com/webmaster/index', wait_until='domcontentloaded')
             await asyncio.sleep(5)
             
-            # Step 2: Click login button - SESUAI RECORDING
-            login_success = await self.safe_click('div.referral-content span', "login button")
+            # Debug: screenshot untuk melihat halaman
+            await self.page.screenshot(path="/home/ubuntu/bot-tele/login_page.png")
+            logger.info("📸 Saved login page screenshot for debugging")
             
-            if not login_success:
-                logger.error("❌ Failed to click login button")
-                return False
-            
-            await asyncio.sleep(3)
-            
-            # Step 3: Click on new login card (sesuai recording)
-            new_login_success = await self.safe_click('div.new-login-card > div', "new login card")
-            
-            if not new_login_success:
-                logger.warning("⚠️ Failed to click new login card, trying alternative...")
-            
-            await asyncio.sleep(2)
-            
-            # Step 4: Click other login way (sesuai recording)
-            other_login_success = await self.safe_click('div.other-login-way', "other login way")
-            
-            if not other_login_success:
-                logger.warning("⚠️ Failed to click other login way, trying alternative...")
-            
-            # TAMBAHKAN JEDA SETELAH KLIK OTHER LOGIN WAY
-            await asyncio.sleep(2)
-            
-            # Step 5: Click email login method - SOLUSI UNTUK ERROR EMAIL LOGIN METHOD
-            logger.info("🔄 Attempting to click email login method with improved selectors...")
-            
-            email_login_success = False
-            selectors = [
-                'div.other-login-way img[alt="email"]',
-                'div.other-item > div:nth-of-type(2) > img',
-                'div.other-item img'
+            # Step 2: Click login button - MULTIPLE APPROACHES
+            login_selectors = [
+                'div.referral-content span',
+                'button:has-text("Login")',
+                'text/Login',
+                '.login-btn',
+                'a[href*="login"]'
             ]
             
-            for selector in selectors:
+            login_success = False
+            for selector in login_selectors:
                 try:
-                    logger.info(f"🔍 Trying selector: {selector}")
-                    element = await self.page.wait_for_selector(selector, timeout=5000)
-                    if element:
-                        await element.click()
-                        email_login_success = True
-                        logger.info(f"✅ Successfully clicked email login method with selector: {selector}")
+                    if await self.safe_click(selector, f"login button dengan {selector}", timeout=5000):
+                        login_success = True
                         break
-                except Exception as e:
-                    logger.debug(f"⚠️ Selector {selector} failed: {e}")
+                except:
                     continue
             
-            # Fallback: jika semua selector gagal, coba ambil semua gambar dan klik yang kedua
-            if not email_login_success:
-                logger.info("🔄 Trying fallback method: click second image in other-item")
-                try:
-                    elements = await self.page.query_selector_all('div.other-item img')
-                    if len(elements) >= 2:
-                        await elements[1].click()
-                        email_login_success = True
-                        logger.info("✅ Successfully clicked email login method using fallback")
-                    else:
-                        logger.error(f"❌ Not enough elements found for fallback: found {len(elements)}")
-                except Exception as e:
-                    logger.error(f"❌ Fallback email login error: {e}")
-            
-            if not email_login_success:
-                logger.error("❌ Failed to click email login method with all methods")
+            if not login_success:
+                logger.error("❌ Failed to click login button dengan semua selector")
                 return False
             
             await asyncio.sleep(3)
             
-            # Step 6: Fill email field - SESUAI RECORDING (#email-input)
-            email_input = await self.page.wait_for_selector('#email-input', timeout=30000)
-            if email_input:
-                await email_input.click(click_count=3)
-                await self.page.keyboard.press('Backspace')
-                await email_input.fill(self.terabox_email)
-                logger.info("✅ Email filled")
-            else:
-                logger.error("❌ Email input (#email-input) not found")
+            # Step 3: Wait for login dialog dan coba multiple approaches untuk email login
+            logger.info("🔄 Menunggu dialog login muncul...")
+            
+            # Tunggu dan screenshot untuk debugging
+            await asyncio.sleep(3)
+            await self.page.screenshot(path="/home/ubuntu/bot-tele/login_dialog.png")
+            logger.info("📸 Saved login dialog screenshot")
+            
+            # Step 4: Coba langsung email login tanpa melalui "other login way" jika memungkinkan
+            logger.info("🔍 Mencari elemen email login langsung...")
+            
+            # Coba multiple approaches untuk email login
+            email_login_success = False
+            
+            # Approach 1: Cari input email langsung
+            try:
+                email_input = await self.page.wait_for_selector('#email-input', timeout=5000)
+                if email_input:
+                    logger.info("✅ Found email input directly, skipping login method selection")
+                    # Langsung isi email dan password
+                    await email_input.click(click_count=3)
+                    await self.page.keyboard.press('Backspace')
+                    await email_input.fill(self.terabox_email)
+                    
+                    password_input = await self.page.wait_for_selector('#pwd-input', timeout=5000)
+                    if password_input:
+                        await password_input.click(click_count=3)
+                        await self.page.keyboard.press('Backspace')
+                        await password_input.fill(self.terabox_password)
+                        
+                        # Submit login
+                        if await self.safe_click('div.btn-class-login', "login submit button"):
+                            email_login_success = True
+            except Exception as e:
+                logger.debug(f"⚠️ Direct email approach failed: {e}")
+            
+            # Approach 2: Jika direct approach gagal, coba melalui "other login way"
+            if not email_login_success:
+                logger.info("🔄 Mencoba melalui other login way...")
+                
+                # Step 4.1: Click other login way
+                other_login_success = await self.safe_click('div.other-login-way', "other login way")
+                
+                if not other_login_success:
+                    # Coba alternatif selector untuk other login way
+                    other_selectors = [
+                        'text/其他登录方式',
+                        'text/Other login methods',
+                        '.other-login-method',
+                        'div[class*="other"]',
+                        'span:has-text("其他")'
+                    ]
+                    
+                    for selector in other_selectors:
+                        try:
+                            if await self.safe_click(selector, f"other login way dengan {selector}", timeout=3000):
+                                other_login_success = True
+                                break
+                        except:
+                            continue
+                
+                if other_login_success:
+                    await asyncio.sleep(2)
+                    
+                    # Screenshot setelah klik other login way
+                    await self.page.screenshot(path="/home/ubuntu/bot-tele/after_other_login.png")
+                    
+                    # Step 4.2: Click email login method - EXTENSIVE SELECTOR LIST
+                    logger.info("🔍 Mencari tombol email login dengan selector komprehensif...")
+                    
+                    email_selectors = [
+                        'div.other-login-way img[alt="email"]',
+                        'div.other-login-way img[alt="Email"]',
+                        'div.other-item > div:nth-of-type(2) > img',
+                        'div.other-item img',
+                        'img[alt="email"]',
+                        'img[alt="Email"]',
+                        'div[class*="email"]',
+                        'div[class*="Email"]',
+                        'text/邮箱登录',
+                        'text/邮箱',
+                        'text/Email',
+                        'text/email'
+                    ]
+                    
+                    for selector in email_selectors:
+                        try:
+                            logger.info(f"🔍 Mencoba selector: {selector}")
+                            if selector.startswith('text/'):
+                                # Handle text selectors
+                                text = selector.replace('text/', '')
+                                element = await self.page.wait_for_selector(f'text={text}', timeout=3000)
+                            else:
+                                element = await self.page.wait_for_selector(selector, timeout=3000)
+                            
+                            if element:
+                                await element.click()
+                                email_login_success = True
+                                logger.info(f"✅ Successfully clicked email login dengan selector: {selector}")
+                                break
+                        except Exception as e:
+                            logger.debug(f"⚠️ Selector {selector} failed: {e}")
+                            continue
+                    
+                    # Fallback: klik elemen kedua dalam other-item
+                    if not email_login_success:
+                        logger.info("🔄 Mencoba fallback: klik elemen kedua di other-item")
+                        try:
+                            elements = await self.page.query_selector_all('div.other-item > div')
+                            if len(elements) >= 2:
+                                await elements[1].click()
+                                email_login_success = True
+                                logger.info("✅ Successfully clicked second element in other-item")
+                        except Exception as e:
+                            logger.error(f"❌ Fallback failed: {e}")
+            
+            if not email_login_success:
+                logger.error("❌ Failed to click email login method dengan semua approach")
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/email_login_failed.png")
+                return False
+            
+            await asyncio.sleep(3)
+            
+            # Step 5: Isi email dan password
+            logger.info("📝 Mengisi email dan password...")
+            
+            # Cari email input dengan multiple selectors
+            email_input_selectors = [
+                '#email-input',
+                'input[type="email"]',
+                'input[name="email"]',
+                'input[placeholder*="email"]',
+                'input[placeholder*="邮箱"]'
+            ]
+            
+            email_filled = False
+            for selector in email_input_selectors:
+                try:
+                    email_input = await self.page.wait_for_selector(selector, timeout=5000)
+                    if email_input:
+                        await email_input.click(click_count=3)
+                        await self.page.keyboard.press('Backspace')
+                        await email_input.fill(self.terabox_email)
+                        email_filled = True
+                        logger.info(f"✅ Email filled dengan selector: {selector}")
+                        break
+                except Exception as e:
+                    logger.debug(f"⚠️ Email selector {selector} failed: {e}")
+                    continue
+            
+            if not email_filled:
+                logger.error("❌ Failed to fill email field")
                 return False
             
             await asyncio.sleep(2)
             
-            # Step 7: Fill password field - SESUAI RECORDING (#pwd-input)
-            password_input = await self.page.wait_for_selector('#pwd-input', timeout=30000)
-            if password_input:
-                await password_input.click(click_count=3)
-                await self.page.keyboard.press('Backspace')
-                await password_input.fill(self.terabox_password)
-                logger.info("✅ Password filled")
-            else:
-                logger.error("❌ Password input (#pwd-input) not found")
+            # Cari password input dengan multiple selectors
+            password_input_selectors = [
+                '#pwd-input',
+                'input[type="password"]',
+                'input[name="password"]',
+                'input[placeholder*="password"]',
+                'input[placeholder*="密码"]'
+            ]
+            
+            password_filled = False
+            for selector in password_input_selectors:
+                try:
+                    password_input = await self.page.wait_for_selector(selector, timeout=5000)
+                    if password_input:
+                        await password_input.click(click_count=3)
+                        await self.page.keyboard.press('Backspace')
+                        await password_input.fill(self.terabox_password)
+                        password_filled = True
+                        logger.info(f"✅ Password filled dengan selector: {selector}")
+                        break
+                except Exception as e:
+                    logger.debug(f"⚠️ Password selector {selector} failed: {e}")
+                    continue
+            
+            if not password_filled:
+                logger.error("❌ Failed to fill password field")
                 return False
             
             await asyncio.sleep(2)
             
-            # Step 8: Click login submit button - SESUAI RECORDING
-            login_submit_success = await self.safe_click('div.btn-class-login', "login submit button")
+            # Step 6: Click login submit button
+            login_submit_selectors = [
+                'div.btn-class-login',
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Login")',
+                'button:has-text("登录")'
+            ]
+            
+            login_submit_success = False
+            for selector in login_submit_selectors:
+                try:
+                    if await self.safe_click(selector, f"login submit dengan {selector}", timeout=5000):
+                        login_submit_success = True
+                        break
+                except:
+                    continue
             
             if not login_submit_success:
                 logger.error("❌ Failed to click login submit button")
@@ -970,8 +1104,8 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Login error: {e}")
             try:
-                await self.page.screenshot(path="/home/ubuntu/bot-tele/login_error.png")
-                logger.info("📸 Saved login error screenshot")
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/login_error_final.png")
+                logger.info("📸 Saved final login error screenshot")
             except:
                 pass
             return False
