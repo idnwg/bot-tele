@@ -828,7 +828,7 @@ class TeraboxPlaywrightUploader:
             return False
 
     async def login_to_terabox(self) -> bool:
-        """Login ke Terabox hanya jika diperlukan"""
+        """Login ke Terabox hanya jika diperlukan - DIPERBAIKI BERDASARKAN RECORDING"""
         try:
             # Cek dulu apakah sudah login
             if await self.check_if_logged_in():
@@ -841,7 +841,7 @@ class TeraboxPlaywrightUploader:
             await self.page.goto('https://www.1024tera.com/webmaster/index', wait_until='domcontentloaded')
             await asyncio.sleep(5)
             
-            # Step 2: Click login button
+            # Step 2: Click login button - SESUAI RECORDING
             login_success = await self.safe_click('div.referral-content span', "login button")
             
             if not login_success:
@@ -850,8 +850,24 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(3)
             
-            # Step 3: Click email login method
-            email_login_success = await self.safe_click('div.other-item > div:nth-of-type(2)', "email login method")
+            # Step 3: Click on new login card (sesuai recording)
+            new_login_success = await self.safe_click('div.new-login-card > div', "new login card")
+            
+            if not new_login_success:
+                logger.warning("⚠️ Failed to click new login card, trying alternative...")
+            
+            await asyncio.sleep(2)
+            
+            # Step 4: Click other login way (sesuai recording)
+            other_login_success = await self.safe_click('div.other-login-way', "other login way")
+            
+            if not other_login_success:
+                logger.warning("⚠️ Failed to click other login way, trying alternative...")
+            
+            await asyncio.sleep(2)
+            
+            # Step 5: Click email login method - SESUAI RECORDING
+            email_login_success = await self.safe_click('div.other-item > div:nth-of-type(2) > img', "email login method")
             
             if not email_login_success:
                 logger.error("❌ Failed to click email login method")
@@ -859,33 +875,33 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(3)
             
-            # Step 4: Fill email field
-            email_input = await self.page.wait_for_selector('[aria-label="Enter your email"]', timeout=30000)
+            # Step 6: Fill email field - SESUAI RECORDING (#email-input)
+            email_input = await self.page.wait_for_selector('#email-input', timeout=30000)
             if email_input:
                 await email_input.click(click_count=3)
                 await self.page.keyboard.press('Backspace')
                 await email_input.fill(self.terabox_email)
                 logger.info("✅ Email filled")
             else:
-                logger.error("❌ Email input not found")
+                logger.error("❌ Email input (#email-input) not found")
                 return False
             
             await asyncio.sleep(2)
             
-            # Step 5: Fill password field
-            password_input = await self.page.wait_for_selector('[aria-label="Enter the password."]', timeout=30000)
+            # Step 7: Fill password field - SESUAI RECORDING (#pwd-input)
+            password_input = await self.page.wait_for_selector('#pwd-input', timeout=30000)
             if password_input:
                 await password_input.click(click_count=3)
                 await self.page.keyboard.press('Backspace')
                 await password_input.fill(self.terabox_password)
                 logger.info("✅ Password filled")
             else:
-                logger.error("❌ Password input not found")
+                logger.error("❌ Password input (#pwd-input) not found")
                 return False
             
             await asyncio.sleep(2)
             
-            # Step 6: Click login submit button
+            # Step 8: Click login submit button - SESUAI RECORDING
             login_submit_success = await self.safe_click('div.btn-class-login', "login submit button")
             
             if not login_submit_success:
@@ -919,7 +935,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Login error: {e}")
             try:
-                await self.page.screenshot(path="/home/ubuntu/bot-tele/login_error.png")  # PATH BARU
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/login_error.png")
                 logger.info("📸 Saved login error screenshot")
             except:
                 pass
@@ -930,32 +946,32 @@ class TeraboxPlaywrightUploader:
         try:
             logger.info("🧭 Navigating to upload page...")
             
+            # Coba navigasi langsung ke halaman upload
             upload_url = "https://dm.1024tera.com/webmaster/new/share"
             logger.info(f"🌐 Direct navigation to: {upload_url}")
             
-            # Approach: Direct navigation dengan verifikasi elemen
             await self.page.goto(upload_url, wait_until='domcontentloaded', timeout=30000)
             await asyncio.sleep(5)
             
             current_url = self.page.url
             logger.info(f"🌐 Current URL after navigation: {current_url}")
             
-            # Verifikasi kita di halaman upload dengan mengecek elemen kunci
-            try:
-                # Cek apakah elemen upload area ada
-                upload_area = await self.page.query_selector("div.source-arr")
-                if upload_area:
-                    logger.info("✅ Successfully navigated to upload page (upload area found)")
-                    return True
-                else:
-                    logger.warning("⚠️ Upload area not found, might not be on upload page")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not verify upload area: {e}")
-        
-            # Fallback: cek URL
+            # Cek apakah kita sudah di halaman upload
             if 'new/share' in current_url:
                 logger.info("✅ Successfully navigated to upload page (URL verified)")
                 return True
+            
+            # Jika di-redirect, coba akses halaman home dulu
+            if 'new/home' in current_url:
+                logger.info("🔄 Redirected to home page, trying to navigate to upload from home...")
+                # Klik tab share sesuai recording
+                share_tab_success = await self.safe_click('div.guide-container > div.tab-item div', "share tab")
+                if share_tab_success:
+                    await asyncio.sleep(3)
+                    current_url = self.page.url
+                    if 'new/share' in current_url:
+                        logger.info("✅ Successfully navigated to upload page from home")
+                        return True
             
             logger.error("❌ Navigation to upload page failed")
             return False
@@ -987,10 +1003,11 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(2)
             
-            # Step 3: Klik dan isi nama folder (sesuai recording)
+            # Step 3: Klik dan isi nama folder (sesuai recording) - DIPERBAIKI DENGAN DOUBLE CLICK
             folder_input = await self.page.wait_for_selector("div.share-save input", timeout=30000)
             if folder_input:
-                await folder_input.click(click_count=3)
+                # Double click untuk select all text (sesuai recording)
+                await folder_input.click(click_count=2)
                 await self.page.keyboard.press('Backspace')
                 await folder_input.fill(folder_name)
                 logger.info("✅ Folder name filled")
@@ -1024,7 +1041,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Error creating folder {folder_name}: {e}")
             try:
-                await self.page.screenshot(path=f"/home/ubuntu/bot-tele/create_folder_error_{folder_name}.png")  # PATH BARU
+                await self.page.screenshot(path=f"/home/ubuntu/bot-tele/create_folder_error_{folder_name}.png")
                 logger.info("📸 Saved create folder error screenshot")
             except:
                 pass
@@ -1054,10 +1071,10 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Tidak ada file yang ditemukan untuk diupload")
                 return []
 
-            # Step 2: Klik tombol upload (Local file / Upload File)
+            # Step 2: Klik tombol upload (Local file / Upload File) - SESUAI RECORDING
             logger.info("🖱️ Mencari dan mengklik tombol upload...")
             
-            upload_clicked = await self.safe_click("div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img", "upload button")
+            upload_clicked = await self.safe_click("div.source-arr > div:nth-of-type(1) > div > div:nth-of-type(1)", "upload button")
             
             if not upload_clicked:
                 logger.error("❌ Gagal menemukan tombol upload")
@@ -1074,7 +1091,7 @@ class TeraboxPlaywrightUploader:
             
             if not file_input:
                 logger.error("❌ Tidak menemukan elemen input file")
-                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_input_error.png")  # PATH BARU
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_input_error.png")
                 return []
 
             # Step 4: Upload semua file sekaligus dengan anti-duplikasi
@@ -1128,7 +1145,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"❌ Gagal upload semua file: {e}")
             try:
-                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_all_files_error.png", full_page=True)  # PATH BARU
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_all_files_error.png", full_page=True)
                 logger.info("📸 Saved upload error screenshot")
             except:
                 pass
@@ -1184,8 +1201,8 @@ class TeraboxPlaywrightUploader:
                             await self.page.goto('https://dm.1024tera.com/webmaster/new/share', wait_until='networkidle')
                             await asyncio.sleep(3)
                         
-                        # Click upload button
-                        if await self.safe_click('div.share-main > div:nth-of-type(1) div:nth-of-type(1) > img', "upload button"):
+                        # Click upload button - SESUAI RECORDING
+                        if await self.safe_click('div.source-arr > div:nth-of-type(1) > div > div:nth-of-type(1)', "upload button"):
                             
                             # Find file input
                             file_input = await self.page.query_selector("div.share-main > div:nth-of-type(1) input:nth-of-type(1)")
@@ -1265,7 +1282,7 @@ class TeraboxPlaywrightUploader:
             
             # Save screenshot untuk debugging
             try:
-                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_result.png")  # PATH BARU
+                await self.page.screenshot(path="/home/ubuntu/bot-tele/upload_result.png")
                 logger.info("📸 Saved upload result screenshot")
             except:
                 pass
@@ -1319,7 +1336,7 @@ class TeraboxPlaywrightUploader:
         except Exception as e:
             logger.error(f"💥 Playwright upload error: {e}")
             try:
-                await self.page.screenshot(path=f"/home/ubuntu/bot-tele/error_{int(time.time())}.png")  # PATH BARU
+                await self.page.screenshot(path=f"/home/ubuntu/bot-tele/error_{int(time.time())}.png")
                 logger.info("📸 Saved error screenshot")
             except:
                 pass
