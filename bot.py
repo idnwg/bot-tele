@@ -1315,7 +1315,7 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ No media files found to upload")
                 return []
             
-            # Buat folder baru terlebih dahulu (fallback method) - HANYA UNTUK TERABOX
+            # Buat folder baru terlebih dahulu (fallback method) - HANYA UNTIK TERABOX
             folder_name = folder_path.name
             if not await self.create_new_folder(folder_name):
                 logger.warning("⚠️ Gagal membuat folder, melanjutkan upload ke root")
@@ -1701,9 +1701,6 @@ class UploadManager:
             
             return []
 
-# ... (KELAS-KELAS LAIN DAN FUNGSI TETAP SAMA SEPERTI SEBELUMNYA)
-# DownloadProcessor, Telegram Bot Handlers, dan main function tetap sama
-
 class DownloadProcessor:
     def __init__(self, mega_manager: MegaManager, file_manager: FileManager, upload_manager: UploadManager, settings_manager: UserSettingsManager):
         self.mega_manager = mega_manager
@@ -1952,7 +1949,713 @@ class DownloadProcessor:
                     'end_time': datetime.now()
                 })
 
-# ... (FUNGSI TELEGRAM BOT HANDLERS TETAP SAMA)
+# ============================ TELEGRAM BOT HANDLERS ============================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message when the command /start is issued."""
+    welcome_text = """
+🤖 **Mega Downloader Bot dengan Upload Terabox**
+
+**Fitur Utama:**
+📥 Download folder dari Mega.nz
+📤 Upload otomatis ke Terabox  
+📝 Auto-rename file numbering
+✏️ Rename folder manual
+📁 Buat folder otomatis di Terabox
+🛡️ ANTI-DUPLIKASI file upload
+📁 Upload by folder name
+🧹 Auto-cleanup setelah selesai
+🛑 Stop proses yang berjalan
+
+**Perintah yang tersedia:**
+/download [url] - Download folder Mega.nz
+/upload [nama_folder] - Upload folder yang sudah didownload
+/rename <old_name> <new_name> - Rename folder hasil download
+/listfolders - Lihat daftar folder yang sudah didownload
+/status - Lihat status download
+/stop [job_id] - Hentikan proses download/upload
+/setprefix [nama] - Set prefix untuk rename
+/setplatform [terabox] - Set platform upload
+/autoupload [on/off] - Toggle auto upload
+/autorename [on/off] - Toggle auto rename
+/autocleanup [on/off] - Toggle auto cleanup
+/mysettings - Lihat pengaturan Anda
+/cleanup - Bersihkan folder download
+/help - Tampilkan bantuan ini
+
+**Fitur Baru:**
+🎯 Upload by folder name: /upload nama_folder
+🛡️ Anti-duplikasi: File tidak akan terupload double
+📋 List folders: /listfolders untuk melihat folder tersedia
+✏️ Rename folder: /rename old_name new_name
+    """
+    await update.message.reply_text(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message when the command /help is issued."""
+    help_text = """
+📖 **Bantuan Mega Downloader Bot**
+
+**Cara Penggunaan:**
+1. **Download**: `/download [mega_folder_url]`
+   Contoh: `/download https://mega.nz/folder/abc123`
+
+2. **Upload by Folder Name**: `/upload [nama_folder]`
+   Contoh: `/upload my_downloaded_folder`
+   Gunakan `/listfolders` untuk melihat folder tersedia
+
+3. **Rename Folder**: `/rename <nama_folder_lama> <nama_folder_baru>`
+   Contoh: `/rename download_abc123 my_new_folder`
+
+4. **List Folders**: `/listfolders`
+
+5. **Cek Status**: `/status`
+
+6. **Stop Proses**: `/stop [job_id]`
+   Contoh: `/stop abc12345`
+
+**Pengaturan:**
+- `/setprefix [nama]` - Set nama prefix untuk file
+- `/setplatform [terabox]` - Set platform upload  
+- `/autoupload [on/off]` - Enable/disable auto upload
+- `/autorename [on/off]` - Enable/disable auto rename
+- `/autocleanup [on/off]` - Enable/disable auto cleanup
+- `/mysettings` - Lihat pengaturan Anda
+
+**Fitur Terabox:**
+✅ Buat folder otomatis di Terabox
+✅ Upload semua file sekaligus
+✅ Generate multiple share links
+✅ Session persistence untuk login
+🛡️ ANTI-DUPLIKASI file upload
+
+**Catatan:**
+- Bot akan otomatis membuat folder di Terabox dengan nama yang sama
+- File akan di-rename dengan format: `prefix 01.ext`
+- Download maksimal 2 folder bersamaan
+- Gunakan `/stop <job_id>` untuk menghentikan proses yang berjalan
+- Fitur anti-duplikasi mencegah file terupload double
+- Gunakan `/rename` untuk merename folder jika download gagal sebagian
+    """
+    await update.message.reply_text(help_text)
+
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /download command."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please provide a Mega.nz folder URL\n"
+                "Contoh: /download https://mega.nz/folder/abc123"
+            )
+            return
+        
+        folder_url = context.args[0]
+        
+        # Validate Mega.nz URL
+        if not folder_url.startswith('https://mega.nz/'):
+            await update.message.reply_text(
+                "❌ Invalid Mega.nz URL\n"
+                "URL harus dimulai dengan: https://mega.nz/"
+            )
+            return
+        
+        # Generate job ID
+        job_id = str(uuid.uuid4())[:8]
+        
+        # Add to download queue
+        download_queue.put((job_id, folder_url, update, context))
+        
+        # Initialize download info
+        active_downloads[job_id] = {
+            'job_id': job_id,
+            'folder_url': folder_url,
+            'status': DownloadStatus.PENDING.value,
+            'chat_id': update.effective_chat.id,
+            'user_id': update.effective_user.id,
+            'queue_time': datetime.now()
+        }
+        
+        await update.message.reply_text(
+            f"✅ Download job added to queue!\n"
+            f"🆔 Job ID: {job_id}\n"
+            f"📥 URL: {folder_url[:50]}...\n"
+            f"📊 Queue position: {download_queue.qsize()}\n"
+            f"⏳ Active downloads: {len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}\n"
+            f"🛑 Gunakan `/stop {job_id}` untuk membatalkan"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in download command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /upload command for manual upload by folder name."""
+    try:
+        if not context.args:
+            # Show available folders
+            folders = mega_manager.get_downloaded_folders()
+            if not folders:
+                await update.message.reply_text(
+                    "❌ No downloaded folders found!\n"
+                    "📥 Use /download first to download folders from Mega.nz"
+                )
+                return
+            
+            folder_list = "📁 **Available Folders:**\n\n"
+            for i, folder in enumerate(folders[:10], 1):  # Show first 10 folders
+                size_mb = folder['total_size'] / (1024 * 1024)
+                folder_list += f"{i}. `{folder['name']}`\n"
+                folder_list += f"   📄 {folder['file_count']} files | 💾 {size_mb:.1f} MB\n"
+            
+            if len(folders) > 10:
+                folder_list += f"\n... and {len(folders) - 10} more folders"
+            
+            folder_list += "\n\n**Usage:** `/upload folder_name`"
+            await update.message.reply_text(folder_list)
+            return
+        
+        folder_name = context.args[0]
+        
+        # Find folder by name
+        folder_path = mega_manager.find_folder_by_name(folder_name)
+        
+        if not folder_path:
+            await update.message.reply_text(
+                f"❌ Folder '{folder_name}' not found!\n"
+                f"📋 Use /listfolders to see available folders"
+            )
+            return
+        
+        # Generate job ID
+        job_id = str(uuid.uuid4())[:8]
+        
+        # Initialize upload info
+        active_downloads[job_id] = {
+            'job_id': job_id,
+            'folder_path': str(folder_path),
+            'folder_name': folder_path.name,
+            'status': DownloadStatus.UPLOADING.value,
+            'chat_id': update.effective_chat.id,
+            'user_id': update.effective_user.id,
+            'start_time': datetime.now(),
+            'is_manual_upload': True
+        }
+        
+        # Count files in folder
+        all_files = [f for f in folder_path.rglob('*') if f.is_file()]
+        file_count = len(all_files)
+        
+        await update.message.reply_text(
+            f"✅ Folder found!\n"
+            f"📁 Name: {folder_path.name}\n"
+            f"📄 Files: {file_count}\n"
+            f"🆔 Job ID: {job_id}\n"
+            f"🔄 Starting upload to Terabox..."
+        )
+        
+        # Start upload
+        await upload_manager.upload_to_terabox(folder_path, update, context, job_id)
+        
+        # Mark as completed after upload
+        if job_id in active_downloads:
+            active_downloads[job_id].update({
+                'status': DownloadStatus.COMPLETED.value,
+                'end_time': datetime.now()
+            })
+            completed_downloads[job_id] = active_downloads[job_id]
+            del active_downloads[job_id]
+        
+    except Exception as e:
+        logger.error(f"Error in upload command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def list_folders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /listfolders command to show downloaded folders."""
+    try:
+        folders = mega_manager.get_downloaded_folders()
+        
+        if not folders:
+            await update.message.reply_text(
+                "📭 No downloaded folders found!\n"
+                "📥 Use /download to download folders from Mega.nz"
+            )
+            return
+        
+        folder_list = "📁 **Downloaded Folders:**\n\n"
+        
+        for i, folder in enumerate(folders[:15], 1):  # Show first 15 folders
+            size_mb = folder['total_size'] / (1024 * 1024)
+            created_time = datetime.fromtimestamp(folder['created_time']).strftime('%Y-%m-%d %H:%M')
+            
+            folder_list += f"**{i}. {folder['name']}**\n"
+            folder_list += f"   📄 {folder['file_count']} files | 💾 {size_mb:.1f} MB\n"
+            folder_list += f"   🕒 {created_time}\n"
+            folder_list += f"   📤 Upload: `/upload {folder['name']}`\n"
+            folder_list += f"   ✏️ Rename: `/rename {folder['name']} new_name`\n\n"
+        
+        if len(folders) > 15:
+            folder_list += f"📊 ... and {len(folders) - 15} more folders\n\n"
+        
+        folder_list += "💡 **Usage:**\n- `/upload folder_name` untuk upload\n- `/rename old_name new_name` untuk rename"
+        
+        await update.message.reply_text(folder_list)
+        
+    except Exception as e:
+        logger.error(f"Error in list_folders command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def rename_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /rename command to rename downloaded folders."""
+    try:
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "❌ Format perintah: /rename <nama_folder_lama> <nama_folder_baru>\n"
+                "Contoh: /rename download_abc123 my_new_folder\n\n"
+                "💡 Gunakan /listfolders untuk melihat folder yang tersedia"
+            )
+            return
+
+        old_name = context.args[0]
+        new_name = context.args[1]
+
+        success, message = FileManager.rename_folder(old_name, new_name)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ {message}\n\n"
+                f"📁 Folder berhasil direname!\n"
+                f"📤 Sekarang bisa diupload dengan: /upload {new_name}"
+            )
+        else:
+            await update.message.reply_text(f"❌ {message}")
+
+    except Exception as e:
+        logger.error(f"Error in rename command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /status command."""
+    try:
+        if not active_downloads and not completed_downloads and not cancelled_downloads:
+            await update.message.reply_text("📊 No active, completed, or cancelled downloads")
+            return
+        
+        status_text = "📊 **Download Status**\n\n"
+        
+        # Active downloads
+        if active_downloads:
+            status_text += "**🟢 Active Downloads:**\n"
+            for job_id, info in list(active_downloads.items())[:5]:  # Show last 5
+                status_text += f"• `{job_id}`: {info['status']}"
+                if 'folder_url' in info:
+                    status_text += f" - {info['folder_url'][:30]}..."
+                elif 'folder_name' in info:
+                    status_text += f" - {info['folder_name']}"
+                status_text += f" - /stop_{job_id}\n"
+        else:
+            status_text += "**🔴 No active downloads**\n"
+        
+        # Queue info
+        status_text += f"\n**📥 Queue:** {download_queue.qsize()} waiting\n"
+        status_text += f"**⚡ Active:** {len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}\n"
+        
+        # Downloaded folders info
+        folders = mega_manager.get_downloaded_folders()
+        status_text += f"**📁 Downloaded Folders:** {len(folders)}\n"
+        
+        # Recent completed
+        if completed_downloads:
+            completed_count = len(completed_downloads)
+            status_text += f"\n**✅ Completed:** {completed_count} jobs"
+            if completed_count > 0:
+                latest_job = list(completed_downloads.keys())[-1]
+                status_text += f" (Latest: `{latest_job}`)"
+        
+        # Recent cancelled
+        if cancelled_downloads:
+            cancelled_count = len(cancelled_downloads)
+            status_text += f"\n**🟡 Cancelled:** {cancelled_count} jobs"
+        
+        status_text += f"\n\n**🛑 Usage:** `/stop job_id` to stop a process"
+        status_text += f"\n**📁 Usage:** `/listfolders` to see downloaded folders"
+        status_text += f"\n**✏️ Usage:** `/rename old_name new_name` to rename folders"
+        
+        await update.message.reply_text(status_text)
+        
+    except Exception as e:
+        logger.error(f"Error in status command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /stop command to cancel a running job."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please provide a job ID\n"
+                "Contoh: /stop abc12345\n"
+                "Gunakan /status untuk melihat job ID yang aktif"
+            )
+            return
+        
+        job_id = context.args[0]
+        
+        # Check if job exists in active downloads
+        if job_id not in active_downloads:
+            await update.message.reply_text(
+                f"❌ Job ID `{job_id}` tidak ditemukan dalam proses aktif!\n"
+                f"Gunakan /status untuk melihat job yang sedang berjalan"
+            )
+            return
+        
+        job_info = active_downloads[job_id]
+        current_status = job_info['status']
+        
+        # Cancel the job based on its current status
+        if current_status in [DownloadStatus.DOWNLOADING.value, DownloadStatus.PENDING.value]:
+            # Stop download process
+            success = mega_manager.stop_download(job_id)
+            
+            if success or current_status == DownloadStatus.PENDING.value:
+                # Remove from queue if pending
+                if current_status == DownloadStatus.PENDING.value:
+                    # Create a temporary queue to filter out the cancelled job
+                    temp_queue = Queue()
+                    while not download_queue.empty():
+                        q_job_id, q_folder_url, q_update, q_context = download_queue.get()
+                        if q_job_id != job_id:
+                            temp_queue.put((q_job_id, q_folder_url, q_update, q_context))
+                    
+                    # Replace the original queue
+                    while not temp_queue.empty():
+                        download_queue.put(temp_queue.get())
+                
+                # Update status to cancelled
+                active_downloads[job_id]['status'] = DownloadStatus.CANCELLED.value
+                active_downloads[job_id]['end_time'] = datetime.now()
+                
+                # Move to cancelled downloads
+                cancelled_downloads[job_id] = active_downloads[job_id]
+                del active_downloads[job_id]
+                
+                await update.message.reply_text(
+                    f"✅ Job `{job_id}` berhasil dihentikan!\n"
+                    f"📛 Status: {current_status} → cancelled\n"
+                    f"⏰ Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                
+                # Send progress message if exists
+                if job_id in user_progress_messages:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=job_info['chat_id'],
+                            text=f"🛑 Job `{job_id}` telah dihentikan oleh user!"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Could not send cancellation message: {e}")
+            else:
+                await update.message.reply_text(
+                    f"⚠️ Gagal menghentikan download untuk job `{job_id}`\n"
+                    f"Proses mungkin sudah selesai atau sedang dalam tahap lain"
+                )
+        
+        elif current_status == DownloadStatus.UPLOADING.value:
+            # For uploads, we can't easily stop Playwright, so we mark as cancelled
+            # and let it finish but skip further processing
+            active_downloads[job_id]['status'] = DownloadStatus.CANCELLED.value
+            active_downloads[job_id]['end_time'] = datetime.now()
+            
+            # Move to cancelled downloads
+            cancelled_downloads[job_id] = active_downloads[job_id]
+            del active_downloads[job_id]
+            
+            await update.message.reply_text(
+                f"✅ Upload job `{job_id}` ditandai untuk dibatalkan!\n"
+                f"📛 Proses upload akan berhenti setelah tahap saat ini selesai\n"
+                f"⏰ Waktu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        
+        else:
+            await update.message.reply_text(
+                f"⚠️ Job `{job_id}` sedang dalam status `{current_status}`\n"
+                f"Tidak dapat dihentikan pada tahap ini"
+            )
+        
+    except Exception as e:
+        logger.error(f"Error in stop command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /counterstatus command."""
+    try:
+        status_text = "📊 **Counter Status**\n\n"
+        status_text += f"**📥 Download Queue:** {download_queue.qsize()}\n"
+        status_text += f"**⚡ Active Downloads:** {len(active_downloads)}\n"
+        status_text += f"**✅ Completed Downloads:** {len(completed_downloads)}\n"
+        status_text += f"**🟡 Cancelled Downloads:** {len(cancelled_downloads)}\n"
+        status_text += f"**🔢 Next Job Number:** #{upload_manager._job_counter}\n"
+        status_text += f"**👥 User Settings:** {len(settings_manager.settings)} users"
+        
+        # Downloaded folders count
+        folders = mega_manager.get_downloaded_folders()
+        status_text += f"\n**📁 Downloaded Folders:** {len(folders)}"
+        
+        await update.message.reply_text(status_text)
+        
+    except Exception as e:
+        logger.error(f"Error in counter status command: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /debug command for system diagnostics."""
+    try:
+        debug_info = mega_manager.debug_mega_session()
+        
+        debug_text = "🐛 **Debug Information**\n\n"
+        
+        # Mega-get status
+        debug_text += f"**Mega-get Path:** {debug_info.get('mega_get_path', 'N/A')}\n"
+        debug_text += f"**Mega-get Exists:** {debug_info.get('mega_get_exists', False)}\n"
+        debug_text += f"**Mega-get Executable:** {debug_info.get('mega_get_executable', False)}\n"
+        
+        # Accounts
+        debug_text += f"**Mega Accounts:** {len(mega_manager.accounts)}\n"
+        if mega_manager.accounts:
+            debug_text += f"**Current Account:** {debug_info.get('current_account', 'N/A')}\n"
+        
+        # Disk space
+        if 'disk_space' in debug_info:
+            debug_text += f"**Disk Space:**\n{debug_info['disk_space']}\n"
+        
+        # Downloads directory
+        debug_text += f"**Downloads Writable:** {debug_info.get('downloads_writable', False)}\n"
+        
+        # Downloaded folders
+        folders = mega_manager.get_downloaded_folders()
+        debug_text += f"**Downloaded Folders:** {len(folders)}\n"
+        
+        # Active processes
+        debug_text += f"**Active Processes:** {len(mega_manager.active_processes)}\n"
+        
+        await update.message.reply_text(debug_text)
+        
+    except Exception as e:
+        logger.error(f"Error in debug command: {e}")
+        await update.message.reply_text(f"❌ Debug error: {str(e)}")
+
+async def set_prefix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set file prefix for auto-rename."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please provide a prefix\n"
+                "Contoh: /setprefix myfiles"
+            )
+            return
+        
+        prefix = context.args[0]
+        user_id = update.effective_user.id
+        
+        settings_manager.update_user_settings(user_id, {'prefix': prefix})
+        
+        await update.message.reply_text(
+            f"✅ Prefix updated to: {prefix}\n"
+            f"File akan di-rename sebagai: {prefix} 01.ext, {prefix} 02.ext, dst."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in set_prefix: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def set_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set upload platform."""
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please provide a platform\n"
+                "Contoh: /setplatform terabox"
+            )
+            return
+        
+        platform = context.args[0].lower()
+        
+        if platform not in ['terabox']:
+            await update.message.reply_text(
+                f"❌ Platform tidak didukung: {platform}\n"
+                f"Platform yang tersedia: terabox"
+            )
+            return
+        
+        user_id = update.effective_user.id
+        settings_manager.update_user_settings(user_id, {'platform': platform})
+        
+        await update.message.reply_text(
+            f"✅ Platform updated to: {platform}\n"
+            f"File akan diupload ke: {platform}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in set_platform: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_upload_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle auto-upload feature."""
+    try:
+        if not context.args:
+            # Show current status
+            user_id = update.effective_user.id
+            user_settings = settings_manager.get_user_settings(user_id)
+            auto_upload = user_settings.get('auto_upload', True)
+            
+            status = "ON" if auto_upload else "OFF"
+            await update.message.reply_text(
+                f"🔄 Auto-upload status: {status}\n"
+                f"Gunakan: /autoupload on atau /autoupload off"
+            )
+            return
+        
+        toggle = context.args[0].lower()
+        
+        if toggle not in ['on', 'off']:
+            await update.message.reply_text(
+                "❌ Invalid option. Use: /autoupload on atau /autoupload off"
+            )
+            return
+        
+        user_id = update.effective_user.id
+        auto_upload = toggle == 'on'
+        settings_manager.update_user_settings(user_id, {'auto_upload': auto_upload})
+        
+        status = "ON" if auto_upload else "OFF"
+        await update.message.reply_text(f"✅ Auto-upload: {status}")
+        
+    except Exception as e:
+        logger.error(f"Error in auto_upload_toggle: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_rename_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle auto-rename feature."""
+    try:
+        if not context.args:
+            # Show current status
+            user_id = update.effective_user.id
+            user_settings = settings_manager.get_user_settings(user_id)
+            auto_rename = user_settings.get('auto_rename', True)
+            
+            status = "ON" if auto_rename else "OFF"
+            await update.message.reply_text(
+                f"✏️ Auto-rename status: {status}\n"
+                f"Gunakan: /autorename on atau /autorename off"
+            )
+            return
+        
+        toggle = context.args[0].lower()
+        
+        if toggle not in ['on', 'off']:
+            await update.message.reply_text(
+                "❌ Invalid option. Use: /autorename on atau /autorename off"
+            )
+            return
+        
+        user_id = update.effective_user.id
+        auto_rename = toggle == 'on'
+        settings_manager.update_user_settings(user_id, {'auto_rename': auto_rename})
+        
+        status = "ON" if auto_rename else "OFF"
+        await update.message.reply_text(f"✅ Auto-rename: {status}")
+        
+    except Exception as e:
+        logger.error(f"Error in auto_rename_toggle: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def auto_cleanup_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle auto-cleanup feature."""
+    try:
+        if not context.args:
+            # Show current status
+            user_id = update.effective_user.id
+            user_settings = settings_manager.get_user_settings(user_id)
+            auto_cleanup = user_settings.get('auto_cleanup', True)
+            
+            status = "ON" if auto_cleanup else "OFF"
+            await update.message.reply_text(
+                f"🧹 Auto-cleanup status: {status}\n"
+                f"Gunakan: /autocleanup on atau /autocleanup off"
+            )
+            return
+        
+        toggle = context.args[0].lower()
+        
+        if toggle not in ['on', 'off']:
+            await update.message.reply_text(
+                "❌ Invalid option. Use: /autocleanup on atau /autocleanup off"
+            )
+            return
+        
+        user_id = update.effective_user.id
+        auto_cleanup = toggle == 'on'
+        settings_manager.update_user_settings(user_id, {'auto_cleanup': auto_cleanup})
+        
+        status = "ON" if auto_cleanup else "OFF"
+        await update.message.reply_text(f"✅ Auto-cleanup: {status}")
+        
+    except Exception as e:
+        logger.error(f"Error in auto_cleanup_toggle: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def my_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user settings."""
+    try:
+        user_id = update.effective_user.id
+        user_settings = settings_manager.get_user_settings(user_id)
+        
+        settings_text = "⚙️ **Your Settings**\n\n"
+        settings_text += f"**📝 Prefix:** {user_settings.get('prefix', 'file_')}\n"
+        settings_text += f"**📤 Platform:** {user_settings.get('platform', 'terabox')}\n"
+        settings_text += f"**🔄 Auto-upload:** {'ON' if user_settings.get('auto_upload', True) else 'OFF'}\n"
+        settings_text += f"**✏️ Auto-rename:** {'ON' if user_settings.get('auto_rename', True) else 'OFF'}\n"
+        settings_text += f"**🧹 Auto-cleanup:** {'ON' if user_settings.get('auto_cleanup', True) else 'OFF'}\n"
+        
+        await update.message.reply_text(settings_text)
+        
+    except Exception as e:
+        logger.error(f"Error in my_settings: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cleanup download directories."""
+    try:
+        # Count files and size before cleanup
+        total_size = 0
+        total_files = 0
+        total_folders = 0
+        
+        for path in DOWNLOAD_BASE.rglob('*'):
+            if path.is_file():
+                total_files += 1
+                total_size += path.stat().st_size
+            elif path.is_dir():
+                total_folders += 1
+        
+        # Perform cleanup
+        for item in DOWNLOAD_BASE.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            elif item.is_file():
+                item.unlink()
+        
+        # Format size
+        size_mb = total_size / (1024 * 1024)
+        
+        await update.message.reply_text(
+            f"🧹 Cleanup completed!\n"
+            f"📁 Folders removed: {total_folders}\n"
+            f"📄 Files removed: {total_files}\n"
+            f"💾 Space freed: {size_mb:.2f} MB"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in cleanup_command: {e}")
+        await update.message.reply_text(f"❌ Cleanup error: {str(e)}")
 
 # Initialize managers
 logger.info("🔄 Initializing managers dengan path baru /home/ubuntu/bot-tele...")
