@@ -828,7 +828,7 @@ class TeraboxPlaywrightUploader:
             return False
 
     async def login_to_terabox(self) -> bool:
-        """Login ke Terabox hanya jika diperlukan - DIPERBAIKI BERDASARKAN RECORDING"""
+        """Login ke Terabox hanya jika diperlukan - DIPERBAIKI UNTUK EMAIL LOGIN METHOD"""
         try:
             # Cek dulu apakah sudah login
             if await self.check_if_logged_in():
@@ -864,13 +864,48 @@ class TeraboxPlaywrightUploader:
             if not other_login_success:
                 logger.warning("⚠️ Failed to click other login way, trying alternative...")
             
+            # TAMBAHKAN JEDA SETELAH KLIK OTHER LOGIN WAY
             await asyncio.sleep(2)
             
-            # Step 5: Click email login method - SESUAI RECORDING
-            email_login_success = await self.safe_click('div.other-item > div:nth-of-type(2) > img', "email login method")
+            # Step 5: Click email login method - SOLUSI UNTUK ERROR EMAIL LOGIN METHOD
+            logger.info("🔄 Attempting to click email login method with improved selectors...")
+            
+            email_login_success = False
+            selectors = [
+                'div.other-login-way img[alt="email"]',
+                'div.other-item > div:nth-of-type(2) > img',
+                'div.other-item img'
+            ]
+            
+            for selector in selectors:
+                try:
+                    logger.info(f"🔍 Trying selector: {selector}")
+                    element = await self.page.wait_for_selector(selector, timeout=5000)
+                    if element:
+                        await element.click()
+                        email_login_success = True
+                        logger.info(f"✅ Successfully clicked email login method with selector: {selector}")
+                        break
+                except Exception as e:
+                    logger.debug(f"⚠️ Selector {selector} failed: {e}")
+                    continue
+            
+            # Fallback: jika semua selector gagal, coba ambil semua gambar dan klik yang kedua
+            if not email_login_success:
+                logger.info("🔄 Trying fallback method: click second image in other-item")
+                try:
+                    elements = await self.page.query_selector_all('div.other-item img')
+                    if len(elements) >= 2:
+                        await elements[1].click()
+                        email_login_success = True
+                        logger.info("✅ Successfully clicked email login method using fallback")
+                    else:
+                        logger.error(f"❌ Not enough elements found for fallback: found {len(elements)}")
+                except Exception as e:
+                    logger.error(f"❌ Fallback email login error: {e}")
             
             if not email_login_success:
-                logger.error("❌ Failed to click email login method")
+                logger.error("❌ Failed to click email login method with all methods")
                 return False
             
             await asyncio.sleep(3)
