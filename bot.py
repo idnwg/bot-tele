@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from queue import Queue
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
@@ -32,16 +32,63 @@ from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 # Load environment variables
 load_dotenv()
 
-# Configure logging with more detailed format
+# ============================ LOGGING SYSTEM UPDATE ============================
+class DailyRotatingFileHandler(logging.Handler):
+    """Custom handler untuk membuat file log per tanggal"""
+    
+    def __init__(self, log_directory='logs'):
+        super().__init__()
+        self.log_directory = Path(log_directory)
+        self.log_directory.mkdir(exist_ok=True)
+        self.current_date = datetime.now().date()
+        self.current_log_file = self._get_log_file_path()
+        self._setup_handler()
+    
+    def _get_log_file_path(self) -> Path:
+        """Dapatkan path file log untuk tanggal hari ini"""
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        return self.log_directory / f"bot_{date_str}.log"
+    
+    def _setup_handler(self):
+        """Setup file handler untuk tanggal hari ini"""
+        self.current_log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.file_handler = logging.FileHandler(self.current_log_file, encoding='utf-8')
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+        )
+        self.file_handler.setFormatter(formatter)
+    
+    def emit(self, record):
+        """Emit log record dengan pengecekan rotasi harian"""
+        today = datetime.now().date()
+        
+        # Rotasi jika sudah ganti tanggal
+        if today != self.current_date:
+            self.current_date = today
+            self.current_log_file = self._get_log_file_path()
+            self.file_handler.close()
+            self._setup_handler()
+        
+        self.file_handler.emit(record)
+    
+    def close(self):
+        """Close handler"""
+        self.file_handler.close()
+        super().close()
+
+# Setup logging dengan rotasi harian
+log_handler = DailyRotatingFileHandler('/home/ubuntu/bot-tele/logs')
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.FileHandler('bot.log'),
+        log_handler,
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+logger.info("🔄 Logging system initialized dengan rotasi harian")
+
+# ============================ END LOGGING UPDATE ============================
 
 # Constants - UPDATE PATH KE LOKASI BARU
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.heic'}
@@ -56,6 +103,9 @@ completed_downloads: Dict[str, Dict] = {}
 cancelled_downloads: Dict[str, Dict] = {}
 user_settings = {}
 user_progress_messages = {}
+
+# Global untuk tracking waktu download
+download_durations: Dict[str, float] = {}
 
 class DownloadStatus(Enum):
     PENDING = "pending"
@@ -310,8 +360,8 @@ class MegaManager:
             logger.error(f"💥 Error stopping download for job {job_id}: {e}")
             return False
     
-    def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str]:
-        """Download folder from Mega.nz using mega-get with detailed logging"""
+    def download_mega_folder(self, folder_url: str, download_path: Path, job_id: str) -> Tuple[bool, str, float]:
+        """Download folder from Mega.nz using mega-get dengan detailed logging dan tracking waktu"""
         logger.info(f"🚀 Starting download process for job {job_id}")
         logger.info(f"📥 URL: {folder_url}")
         logger.info(f"📁 Download path: {download_path}")
@@ -338,7 +388,7 @@ class MegaManager:
                 except Exception as e:
                     error_msg = f"Cannot write to download directory: {str(e)}"
                     logger.error(f"❌ {error_msg}")
-                    return False, error_msg
+                    return False, error_msg, 0
                 
                 # Change to base download directory for mega-get
                 original_cwd = os.getcwd()
@@ -384,6 +434,10 @@ class MegaManager:
                     download_duration = end_time - start_time
                     logger.info(f"⏰ Download completed at: {datetime.now()}, duration: {download_duration:.2f}s")
                     
+                    # Simpan durasi download untuk timeout upload
+                    download_durations[job_id] = download_duration
+                    logger.info(f"⏱️ Download duration saved for upload timeout: {download_duration:.2f}s")
+                    
                     # Log command results
                     logger.info(f"📊 Download command return code: {return_code}")
                     logger.info(f"📤 Download stdout: {stdout}")
@@ -405,7 +459,7 @@ class MegaManager:
                         if not downloaded_folder:
                             error_msg = "Download completed but no folder with files was found"
                             logger.error(f"❌ {error_msg}")
-                            return False, error_msg
+                            return False, error_msg, download_duration
                         
                         # Update download path dengan folder yang sebenarnya
                         actual_download_path = downloaded_folder
@@ -420,7 +474,7 @@ class MegaManager:
                         if total_files == 0:
                             error_msg = "Download completed but no files were found in the folder"
                             logger.error(f"❌ {error_msg}")
-                            return False, error_msg
+                            return False, error_msg, download_duration
                         
                         # Log all files for debugging
                         for f in files[:10]:  # Log first 10 files only
@@ -439,8 +493,9 @@ class MegaManager:
                         # Simpan path aktual ke active_downloads
                         if job_id in active_downloads:
                             active_downloads[job_id]['actual_download_path'] = str(actual_download_path)
+                            active_downloads[job_id]['download_duration'] = download_duration
                         
-                        return True, success_msg
+                        return True, success_msg, download_duration
                     else:
                         error_msg = stderr if stderr else stdout
                         logger.error(f"❌ Download command failed: {error_msg}")
@@ -454,13 +509,13 @@ class MegaManager:
                                 logger.info(f"🔄 Retrying download with different account (attempt {retry_count + 1}/{max_retries})")
                                 continue
                             else:
-                                return False, "All accounts have exceeded storage quota. Please try again later."
+                                return False, "All accounts have exceeded storage quota. Please try again later.", download_duration
                         elif "not found" in error_msg.lower():
-                            return False, "Folder not found or link invalid"
+                            return False, "Folder not found or link invalid", download_duration
                         elif "login" in error_msg.lower():
-                            return False, "Login session expired or invalid"
+                            return False, "Login session expired or invalid", download_duration
                         else:
-                            return False, f"Download failed: {error_msg}"
+                            return False, f"Download failed: {error_msg}", download_duration
                             
                 except Exception as e:
                     os.chdir(original_cwd)
@@ -468,13 +523,13 @@ class MegaManager:
                     if job_id in self.active_processes:
                         del self.active_processes[job_id]
                     logger.error(f"💥 Unexpected error during download: {e}")
-                    return False, f"Unexpected error: {str(e)}"
+                    return False, f"Unexpected error: {str(e)}", download_duration
                     
             except Exception as e:
                 logger.error(f"💥 Error in download process: {e}")
-                return False, f"Process error: {str(e)}"
+                return False, f"Process error: {str(e)}", 0
         
-        return False, f"Download failed after {max_retries} retries due to quota issues"
+        return False, f"Download failed after {max_retries} retries due to quota issues", 0
 
     def get_downloaded_folders(self) -> List[Dict]:
         """Get list of all downloaded folders in DOWNLOAD_BASE"""
@@ -594,7 +649,7 @@ class FileManager:
             return False, f"Error: {str(e)}"
 
 class TeraboxPlaywrightUploader:
-    def __init__(self):
+    def __init__(self, upload_timeout: int = 600000):
         self.playwright = None
         self.browser = None
         self.context = None
@@ -603,9 +658,9 @@ class TeraboxPlaywrightUploader:
         self.terabox_password = os.getenv('TERABOX_PASSWORD')
         self.current_domain = None
         self.session_file = "/home/ubuntu/bot-tele/terabox_session.json"  # PATH BARU
-        self.timeout = 600000  # DITINGKATKAN menjadi 600 detik untuk upload banyak file
+        self.timeout = upload_timeout  # TIMEOUT DINAMIS berdasarkan waktu download
         self.uploaded_files_tracker = set()  # Track files yang sudah diupload
-        logger.info("🌐 TeraboxPlaywrightUploader initialized dengan session persistence + anti-duplikasi")
+        logger.info(f"🌐 TeraboxPlaywrightUploader initialized dengan timeout: {upload_timeout}ms")
 
     def get_current_domain(self, url: str) -> str:
         """Extract domain from URL"""
@@ -653,7 +708,7 @@ class TeraboxPlaywrightUploader:
                     '--disable-site-isolation-trials',
                     '--disable-features=site-per-process',
                 ],
-                timeout=600000  # DITINGKATKAN menjadi 600 detik
+                timeout=self.timeout  # TIMEOUT DINAMIS
             )
             
             # Load session jika ada dan diminta
@@ -715,15 +770,21 @@ class TeraboxPlaywrightUploader:
             logger.error(f"❌ Failed to save session: {e}")
             return False
 
-    async def wait_for_network_idle(self, timeout: int = 300000):  # DITINGKATKAN
-        """Wait for network to be idle"""
+    async def wait_for_network_idle(self, timeout: int = None):
+        """Wait for network to be idle dengan timeout dinamis"""
+        if timeout is None:
+            timeout = self.timeout
+            
         try:
             await self.page.wait_for_load_state('networkidle', timeout=timeout)
         except Exception as e:
             logger.debug(f"Network idle wait timeout: {e}")
 
-    async def safe_click(self, selector: str, description: str, timeout: int = 60000) -> bool:
+    async def safe_click(self, selector: str, description: str, timeout: int = None) -> bool:
         """Safe click dengan error handling yang lebih baik"""
+        if timeout is None:
+            timeout = min(60000, self.timeout)  # Default 60 detik atau timeout upload
+            
         try:
             # Cek jika page sudah closed
             if self.page.is_closed():
@@ -785,22 +846,23 @@ class TeraboxPlaywrightUploader:
                 await file_input.set_input_files(files_to_upload)
                 logger.info(f"✅ Successfully sent {len(files_to_upload)} files to upload queue")
                 
-                # Tunggu lebih lama untuk upload banyak file
-                logger.info("⏳ Waiting for upload process to start...")
-                await asyncio.sleep(15)
+                # Tunggu lebih lama untuk upload banyak file - timeout dinamis
+                wait_time = min(15 + len(files_to_upload) * 0.5, 60)  # Maksimal 60 detik
+                logger.info(f"⏳ Waiting for upload process to start ({wait_time} seconds)...")
+                await asyncio.sleep(wait_time)
                 
                 # Track uploaded files
                 for file_path in files_to_upload:
                     file_id = f"{Path(file_path).name}_{Path(file_path).stat().st_size}"
                     self.uploaded_files_tracker.add(file_id)
                 
-                # Tunggu lebih lama untuk upload completion - disesuaikan dengan jumlah file
-                wait_time = min(60 + len(files_to_upload) * 2, 300)  # Maksimal 5 menit
-                logger.info(f"⏳ Waiting for all files to upload ({wait_time} seconds)...")
+                # Tunggu lebih lama untuk upload completion - disesuaikan dengan jumlah file dan timeout dinamis
+                wait_time = min(30 + len(files_to_upload) * 2, self.timeout / 1000 * 0.8)  # Maksimal 80% dari timeout
+                logger.info(f"⏳ Waiting for all files to upload ({wait_time:.1f} seconds)...")
                 await asyncio.sleep(wait_time)
                 
-                # Cek progress upload dengan timeout lebih lama
-                await self.wait_for_network_idle(300000)  # Tunggu 5 menit untuk network idle
+                # Cek progress upload dengan timeout dinamis
+                await self.wait_for_network_idle(int(self.timeout * 0.5))  # 50% dari timeout total
                 
                 logger.info(f"✅ Successfully uploaded {len(files_to_upload)} files in single batch")
                 return True
@@ -1391,10 +1453,10 @@ class TeraboxPlaywrightUploader:
             # Step 5: Tunggu upload selesai
             logger.info("⏳ Menunggu proses upload selesai...")
             
-            # Tunggu waktu yang disesuaikan dengan jumlah file
-            wait_time = min(60 + total_files * 3, 600)  # Maksimal 10 menit
+            # Tunggu waktu yang disesuaikan dengan jumlah file dan timeout dinamis
+            wait_time = min(30 + total_files * 3, self.timeout / 1000 * 0.6)  # Maksimal 60% dari timeout
             await asyncio.sleep(wait_time)
-            await self.wait_for_network_idle(300000)
+            await self.wait_for_network_idle(int(self.timeout * 0.5))
 
             # Step 6: Klik Generate Link
             generate_success = False
@@ -1545,14 +1607,37 @@ class UploadManager:
     def __init__(self):
         self.terabox_key = os.getenv('TERABOX_CONNECT_KEY')
         self.doodstream_key = os.getenv('DOODSTREAM_API_KEY')
-        self.terabox_playwright_uploader = TeraboxPlaywrightUploader()
+        self.terabox_playwright_uploader = None  # Akan diinisialisasi dengan timeout dinamis
         self.terabox_lock = threading.Lock()
         
         # Counter global untuk urutan job upload
         self._job_counter = 1
         self._counter_lock = threading.Lock()
         
-        logger.info("📤 UploadManager initialized dengan Playwright uploader + buat folder + anti-duplikasi + UPLOAD SEMUA FILE SEKALIGUS")
+        logger.info("📤 UploadManager initialized dengan Playwright uploader + timeout dinamis")
+
+    def _get_upload_timeout(self, job_id: str) -> int:
+        """Dapatkan timeout upload berdasarkan durasi download"""
+        try:
+            # Default timeout 10 menit jika tidak ada data download
+            default_timeout = 600000  # 10 menit dalam ms
+            
+            if job_id in download_durations:
+                download_duration = download_durations[job_id]
+                # Timeout upload = durasi download * 1.5 (dalam milidetik)
+                upload_timeout = int(download_duration * 1.5 * 1000)
+                # Minimal 10 menit, maksimal 2 jam
+                upload_timeout = max(600000, min(upload_timeout, 7200000))
+                
+                logger.info(f"⏱️ Calculated upload timeout for {job_id}: {upload_timeout}ms (download: {download_duration:.2f}s)")
+                return upload_timeout
+            else:
+                logger.info(f"⏱️ Using default upload timeout for {job_id}: {default_timeout}ms")
+                return default_timeout
+                
+        except Exception as e:
+            logger.error(f"❌ Error calculating upload timeout: {e}")
+            return 600000  # Fallback 10 menit
 
     async def send_progress_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str, message: str):
         """Send progress message dan update user progress"""
@@ -1582,8 +1667,8 @@ class UploadManager:
             logger.error(f"Error sending progress message: {e}")
 
     async def upload_to_terabox(self, folder_path: Path, update: Update, context: ContextTypes.DEFAULT_TYPE, job_id: str):
-        """Upload files to Terabox menggunakan Playwright automation dengan buat folder - TANPA RETRY"""
-        logger.info(f"🚀 Starting Terabox upload dengan buat folder untuk job {job_id}, folder: {folder_path}")
+        """Upload files to Terabox menggunakan Playwright automation dengan timeout dinamis"""
+        logger.info(f"🚀 Starting Terabox upload dengan timeout dinamis untuk job {job_id}, folder: {folder_path}")
         
         try:
             # Dapatkan nomor job
@@ -1593,6 +1678,12 @@ class UploadManager:
 
             logger.info(f"🔢 Job number: {job_number}")
             
+            # Hitung timeout upload berdasarkan durasi download
+            upload_timeout = self._get_upload_timeout(job_id)
+            
+            # Inisialisasi uploader dengan timeout dinamis
+            self.terabox_playwright_uploader = TeraboxPlaywrightUploader(upload_timeout=upload_timeout)
+            
             await self.send_progress_message(
                 update, context, job_id, 
                 f"📤 Memulai upload ke Terabox...\n"
@@ -1600,7 +1691,7 @@ class UploadManager:
                 f"📁 Folder: {folder_path.name}\n"
                 f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS + Buat Folder\n"
                 f"🛡️ Anti-Duplikasi: AKTIF\n"
-                f"⏰ Timeout: 600 detik (diperpanjang)"
+                f"⏰ Timeout: {upload_timeout/1000/60:.1f} menit (dinamis berdasarkan download)"
             )
 
             # Cek jika credential Terabox tersedia
@@ -1629,6 +1720,7 @@ class UploadManager:
                 update, context, job_id,
                 f"✅ Folder ready for upload!\n"
                 f"📁 Files found: {len(all_files)}\n"
+                f"⏰ Upload timeout: {upload_timeout/1000/60:.1f} menit\n"
                 f"🔄 Starting Terabox automation..."
             )
 
@@ -1638,7 +1730,8 @@ class UploadManager:
                 f"🔄 Mencoba login dan upload otomatis...\n"
                 f"📝 Alur: Buat folder → UPLOAD SEMUA FILE SEKALIGUS → Generate Link\n"
                 f"🛡️ Anti-Duplikasi: File tidak akan terupload double\n"
-                f"🎯 Batch size: SEMUA FILE SEKALIGUS"
+                f"🎯 Batch size: SEMUA FILE SEKALIGUS\n"
+                f"⏱️ Timeout: {upload_timeout/1000/60:.1f} menit"
             )
             
             with self.terabox_lock:
@@ -1654,7 +1747,8 @@ class UploadManager:
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
                         f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS + Buat Folder Otomatis\n"
-                        f"🛡️ Anti-Duplikasi: File terproteksi dari duplikat"
+                        f"🛡️ Anti-Duplikasi: File terproteksi dari duplikat\n"
+                        f"⏱️ Timeout digunakan: {upload_timeout/1000/60:.1f} menit"
                     )
                     logger.info(f"✅ {success_msg}")
                     await self.send_progress_message(update, context, job_id, success_msg)
@@ -1674,6 +1768,7 @@ class UploadManager:
                         f"❌ Upload ke Terabox gagal!\n"
                         f"🔢 Job Number: #{job_number}\n"
                         f"📁 Folder: {folder_path.name}\n"
+                        f"⏱️ Timeout: {upload_timeout/1000/60:.1f} menit\n"
                         f"💡 Error: Proses upload gagal\n"
                         f"🚫 Tidak ada retry otomatis\n"
                         f"📞 Silakan hubungi administrator"
@@ -1771,11 +1866,12 @@ class DownloadProcessor:
                 f"📥 Starting download...\n"
                 f"🆔 Job ID: {job_id}\n"
                 f"📁 Folder: {download_folder_name}\n"
-                f"🔗 URL: {folder_url[:50]}..."
+                f"🔗 URL: {folder_url[:50]}...\n"
+                f"⏱️ Timeout tracking: AKTIF"
             )
             
-            # Download from Mega.nz
-            success, message = self.mega_manager.download_mega_folder(folder_url, download_path, job_id)
+            # Download from Mega.nz dengan tracking waktu
+            success, message, download_duration = self.mega_manager.download_mega_folder(folder_url, download_path, job_id)
             
             # Check if job was cancelled during download
             if job_id not in active_downloads or active_downloads[job_id].get('status') == DownloadStatus.CANCELLED.value:
@@ -1798,6 +1894,7 @@ class DownloadProcessor:
                     update, context, job_id,
                     f"❌ Download failed!\n"
                     f"🆔 Job ID: {job_id}\n"
+                    f"⏱️ Download duration: {download_duration:.2f}s\n"
                     f"📛 Error: {message}"
                 )
                 return
@@ -1821,6 +1918,7 @@ class DownloadProcessor:
                     update, context, job_id,
                     f"❌ Download completed but no folder found!\n"
                     f"🆔 Job ID: {job_id}\n"
+                    f"⏱️ Download duration: {download_duration:.2f}s\n"
                     f"🔍 Please check download directory manually"
                 )
                 return
@@ -1829,7 +1927,8 @@ class DownloadProcessor:
             active_downloads[job_id].update({
                 'status': DownloadStatus.DOWNLOAD_COMPLETED.value,
                 'download_path': str(actual_download_path),
-                'actual_download_path': str(actual_download_path)
+                'actual_download_path': str(actual_download_path),
+                'download_duration': download_duration
             })
             
             await self.upload_manager.send_progress_message(
@@ -1837,6 +1936,7 @@ class DownloadProcessor:
                 f"✅ Download completed!\n"
                 f"🆔 Job ID: {job_id}\n"
                 f"📁 Path: {actual_download_path.name}\n"
+                f"⏱️ Duration: {download_duration:.2f}s\n"
                 f"🔄 Starting file processing..."
             )
             
@@ -1867,6 +1967,8 @@ class DownloadProcessor:
                         f"🆔 Job ID: {job_id}\n"
                         f"📁 Folder: {actual_download_path.name}\n"
                         f"🎯 Platform: {platform}\n"
+                        f"⏱️ Download duration: {download_duration:.2f}s\n"
+                        f"⏰ Upload timeout: {download_duration * 1.5:.1f}s (dinamis)\n"
                         f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS"
                     )
                     
@@ -1951,7 +2053,7 @@ class DownloadProcessor:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message when the command /start is issued."""
     welcome_text = """
-🤖 **Mega Downloader Bot dengan Upload Terabox**
+🤖 **Mega Downloader Bot dengan Upload Terabox - UPDATE TERBARU**
 
 **Fitur Utama:**
 📥 Download folder dari Mega.nz
@@ -1965,11 +2067,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🛑 Stop proses yang berjalan
 🚀 **UPLOAD SEMUA FILE SEKALIGUS**
 
-**Perubahan Terbaru:**
-✅ **UPLOAD SEMUA FILE SEKALIGUS** - Semua file diupload dalam 1 batch
-🛡️ **ANTI-DUPLIKASI** - Tidak ada file yang terupload double
-⏰ **TIMEOUT OPTIMIZED** - Waktu tunggu disesuaikan dengan jumlah file
-🚫 **TIDAK ADA FALLBACK BATCH** - Tidak ada duplikasi file
+**UPDATE TERBARU:**
+✅ **LOGGING HARIAN** - File log dibuat per tanggal (bot_2024-01-01.log)
+⏱️ **TIMEOUT DINAMIS** - Waktu upload disesuaikan dengan durasi download
+🔄 **AUTO-TIMEOUT** - Jika download 20 menit, upload timeout 30 menit
+📊 **TIME TRACKING** - Tracking waktu download untuk optimasi upload
+🛡️ **STABILITY** - Sistem lebih stabil dengan timeout yang tepat
 
 **Perintah yang tersedia:**
 /download [url] - Download folder Mega.nz
@@ -1992,7 +2095,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send help message when the command /help is issued."""
     help_text = """
-📖 **Bantuan Mega Downloader Bot**
+📖 **Bantuan Mega Downloader Bot - UPDATE TERBARU**
 
 **Cara Penggunaan:**
 1. **Download**: `/download [mega_folder_url]`
@@ -2027,9 +2130,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✅ Session persistence untuk login
 🛡️ ANTI-DUPLIKASI file upload
 
-**Perubahan Sistem:**
-✅ **UPLOAD SEMUA FILE SEKALIGUS** - Tidak ada batch, tidak ada duplikasi
-⏰ **TIMEOUT DINAMIS** - Waktu tunggu disesuaikan dengan jumlah file
+**UPDATE SISTEM:**
+✅ **LOGGING HARIAN** - File log terpisah per tanggal
+⏱️ **TIMEOUT DINAMIS** - Waktu upload = 1.5x waktu download
+📊 **TIME TRACKING** - Durasi download dilacak untuk optimasi
+🔄 **AUTO-ADJUST** - Timeout upload menyesuaikan kompleksitas file
 🚫 **TIDAK ADA RETRY** - Jika gagal, proses berhenti
 📞 **ERROR REPORT** - Detail error dikirim ke Telegram
 
@@ -2039,8 +2144,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - Download maksimal 2 folder bersamaan
 - Gunakan `/stop <job_id>` untuk menghentikan proses yang berjalan
 - Fitur anti-duplikasi mencegah file terupload double
-- Gunakan `/rename` untuk merename folder jika download gagal sebagian
-- **FITUR BARU**: Upload semua file sekaligus tanpa batch
+- **FITUR BARU**: Timeout upload dinamis berdasarkan durasi download
+- **LOGGING BARU**: File log dibuat per tanggal di folder /logs/
     """
     await update.message.reply_text(help_text)
 
@@ -2088,6 +2193,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ Active downloads: {len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}\n"
             f"🎯 Upload method: SEMUA FILE SEKALIGUS\n"
             f"🛡️ Anti-duplikasi: AKTIF\n"
+            f"⏱️ Timeout tracking: AKTIF\n"
             f"🛑 Gunakan `/stop {job_id}` untuk membatalkan"
         )
         
@@ -2159,10 +2265,11 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 Job ID: {job_id}\n"
             f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS\n"
             f"🛡️ Anti-duplikasi: AKTIF\n"
+            f"⏰ Timeout: 10 menit (default manual upload)\n"
             f"🔄 Starting upload to Terabox..."
         )
         
-        # Start upload
+        # Start upload dengan timeout default untuk manual upload
         await upload_manager.upload_to_terabox(folder_path, update, context, job_id)
         
         # Mark as completed after upload
@@ -2290,6 +2397,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text += f"\n**✏️ Usage:** `/rename old_name new_name` to rename folders"
         status_text += f"\n**🚀 Upload Method:** SEMUA FILE SEKALIGUS"
         status_text += f"\n**🛡️ Anti-Duplikasi:** AKTIF"
+        status_text += f"\n**⏱️ Timeout System:** DINAMIS berdasarkan durasi download"
         
         await update.message.reply_text(status_text)
         
@@ -2410,6 +2518,9 @@ async def counter_status_command(update: Update, context: ContextTypes.DEFAULT_T
         folders = mega_manager.get_downloaded_folders()
         status_text += f"\n**📁 Downloaded Folders:** {len(folders)}"
         
+        # Download durations info
+        status_text += f"\n**⏱️ Tracked Download Durations:** {len(download_durations)} jobs"
+        
         await update.message.reply_text(status_text)
         
     except Exception as e:
@@ -2446,6 +2557,13 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Active processes
         debug_text += f"**Active Processes:** {len(mega_manager.active_processes)}\n"
+        
+        # Download durations
+        debug_text += f"**Tracked Download Durations:** {len(download_durations)} jobs\n"
+        
+        # Logging info
+        debug_text += f"**Logging System:** Daily rotating logs aktif\n"
+        debug_text += f"**Current Log File:** {log_handler.current_log_file}\n"
         
         await update.message.reply_text(debug_text)
         
@@ -2669,7 +2787,7 @@ async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Cleanup error: {str(e)}")
 
 # Initialize managers
-logger.info("🔄 Initializing managers dengan path baru /home/ubuntu/bot-tele...")
+logger.info("🔄 Initializing managers dengan UPDATE TERBARU...")
 settings_manager = UserSettingsManager()
 mega_manager = MegaManager()
 file_manager = FileManager()
@@ -2680,8 +2798,8 @@ download_processor = DownloadProcessor(mega_manager, file_manager, upload_manage
 download_processor.start_processing()
 
 def main():
-    """Start the bot dengan path baru"""
-    logger.info("🚀 Starting Mega Downloader Bot dengan path baru /home/ubuntu/bot-tele...")
+    """Start the bot dengan UPDATE TERBARU"""
+    logger.info("🚀 Starting Mega Downloader Bot dengan UPDATE TERBARU...")
     
     # Create base download directory dengan path baru
     DOWNLOAD_BASE.mkdir(parents=True, exist_ok=True)
@@ -2757,10 +2875,12 @@ def main():
     application.add_handler(CommandHandler("cleanup", cleanup_command))
     
     # Start bot
-    logger.info("✅ Bot started successfully dengan path baru /home/ubuntu/bot-tele!")
-    logger.info("🚀 FITUR BARU: UPLOAD SEMUA FILE SEKALIGUS - Semua file diupload dalam 1 batch!")
+    logger.info("✅ Bot started successfully dengan UPDATE TERBARU!")
+    logger.info("📅 LOGGING SYSTEM: File log dibuat per tanggal di folder /home/ubuntu/bot-tele/logs/")
+    logger.info("⏱️ TIMEOUT SYSTEM: Timeout upload dinamis berdasarkan durasi download")
+    logger.info("📊 TIME TRACKING: Durasi download dilacak untuk optimasi timeout upload")
+    logger.info("🚀 UPLOAD SYSTEM: Semua file diupload sekaligus tanpa batch")
     logger.info("🛡️ ANTI-DUPLIKASI: File tidak akan terupload double")
-    logger.info("⏰ TIMEOUT OPTIMIZED: Waktu tunggu disesuaikan dengan jumlah file")
     application.run_polling()
 
 if __name__ == '__main__':
