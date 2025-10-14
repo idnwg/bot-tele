@@ -1202,49 +1202,17 @@ class TeraboxPlaywrightUploader:
         try:
             logger.info(f"📁 Membuat folder baru: {folder_name}")
             
-            # PERBAIKAN: Gunakan selector baru untuk folder path
-            folder_dialog_success = False
-            folder_selectors = [
-                "span.upload-path-tips",
-                "span.upload-tips-path",
-                "div.upload-path-tips",
-                "div.upload-tips-path", 
-                ".upload-path-tips",
-                ".upload-tips-path",
-                "span.path-selector",
-                "div[class*='upload-tips']",
-                "span[class*='path']",
-                "div.upload-header div.path"
-            ]
-            
-            for selector in folder_selectors:
-                folder_dialog_success = await self.safe_click(selector, f"folder path selector dengan {selector}", timeout=60000)
-                if folder_dialog_success:
-                    logger.info(f"✅ Berhasil klik folder path dengan selector: {selector}")
-                    break
-                await asyncio.sleep(1)
+            # PERBAIKAN: Gunakan selector yang diberikan untuk folder path
+            folder_dialog_success = await self.safe_click("span.upload-tips-path", "folder path selector", timeout=60000)
             
             if not folder_dialog_success:
-                logger.error("❌ Gagal membuka dialog pilih folder dengan semua selector")
+                logger.error("❌ Gagal membuka dialog pilih folder")
                 return False
             
             await asyncio.sleep(5)
             
-            # Step 2: Klik tombol "New Folder"
-            new_folder_success = False
-            new_folder_selectors = [
-                "div.create-dir",
-                ".create-dir",
-                "div[class*='create']",
-                "button:has-text('New Folder')",
-                "div:has-text('New Folder')"
-            ]
-            
-            for selector in new_folder_selectors:
-                new_folder_success = await self.safe_click(selector, f"new folder button dengan {selector}", timeout=60000)
-                if new_folder_success:
-                    break
-                await asyncio.sleep(1)
+            # Step 2: Klik tombol "New Folder" dengan selector yang diberikan
+            new_folder_success = await self.safe_click("div.btn.btn1.create-dir", "new folder button", timeout=60000)
             
             if not new_folder_success:
                 logger.error("❌ Gagal klik tombol New Folder")
@@ -1252,24 +1220,8 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(3)
             
-            # Step 3: Klik dan isi nama folder
-            folder_input_selectors = [
-                "div.share-save input",
-                "input[type='text']",
-                "input[placeholder*='folder']",
-                "input[placeholder*='nama']"
-            ]
-            
-            folder_input = None
-            for selector in folder_input_selectors:
-                try:
-                    folder_input = await self.page.wait_for_selector(selector, timeout=60000)
-                    if folder_input:
-                        logger.info(f"✅ Found folder input dengan selector: {selector}")
-                        break
-                except Exception as e:
-                    logger.debug(f"⚠️ Folder input selector {selector} failed: {e}")
-                    continue
+            # Step 3: Klik dan isi nama folder dengan selector yang diberikan
+            folder_input = await self.page.wait_for_selector("input.folder-name-text", timeout=60000)
             
             if folder_input:
                 # Double click untuk select all text
@@ -1283,21 +1235,8 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(2)
             
-            # Step 4: Klik tombol centang untuk konfirmasi nama folder
-            confirm_selectors = [
-                "i.folder-name-commit",
-                ".folder-name-commit",
-                "i[class*='commit']",
-                "button:has-text('✓')",
-                "div:has-text('✓')"
-            ]
-            
-            folder_confirm_success = False
-            for selector in confirm_selectors:
-                folder_confirm_success = await self.safe_click(selector, f"folder name confirm button dengan {selector}", timeout=60000)
-                if folder_confirm_success:
-                    break
-                await asyncio.sleep(1)
+            # Step 4: Klik tombol centang untuk konfirmasi nama folder dengan selector yang diberikan
+            folder_confirm_success = await self.safe_click("i.folder-name-commit", "folder name confirm button", timeout=60000)
             
             if not folder_confirm_success:
                 logger.error("❌ Gagal klik tombol konfirmasi nama folder")
@@ -1305,21 +1244,8 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(3)
             
-            # Step 5: Klik tombol "Confirm" untuk membuat folder
-            create_confirm_selectors = [
-                "div.create-confirm",
-                ".create-confirm",
-                "button:has-text('Confirm')",
-                "div:has-text('Confirm')",
-                "button:has-text('OK')"
-            ]
-            
-            create_confirm_success = False
-            for selector in create_confirm_selectors:
-                create_confirm_success = await self.safe_click(selector, f"create folder confirm button dengan {selector}", timeout=60000)
-                if create_confirm_success:
-                    break
-                await asyncio.sleep(1)
+            # Step 5: Klik tombol "Confirm" untuk membuat folder dengan selector yang diberikan
+            create_confirm_success = await self.safe_click("div.btn.create-confirm", "create folder confirm button", timeout=60000)
             
             if not create_confirm_success:
                 logger.error("❌ Gagal klik tombol confirm pembuatan folder")
@@ -1368,34 +1294,14 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Page tertutup sebelum klik upload")
                 return []
 
-            # Step 2: Klik tombol upload
-            logger.info("🖱️ Mencari dan mengklik tombol upload...")
+            # Step 2: Klik tombol upload dengan selector yang diberikan
+            logger.info("🖱️ Mencari dan mengklik tombol upload Local File...")
             
-            upload_selectors = [
-                "div.local-item",
-                "div.source-arr > div:nth-of-type(1) > div > div:nth-of-type(1)",
-                ".source-arr div:first-child div:first-child",
-                "div[class*='source-arr'] div:first-child",
-                "button:has-text('Upload File')",
-                "div:has-text('Upload File')",
-                "div:has-text('Select File')"
-            ]
-            
-            upload_clicked = False
-            for selector in upload_selectors:
-                # Cek page status sebelum setiap klik
-                if self.page.is_closed():
-                    logger.error("❌ Page tertutup selama proses klik upload")
-                    return []
-                    
-                upload_clicked = await self.safe_click(selector, f"upload button dengan {selector}", timeout=60000)
-                if upload_clicked:
-                    logger.info(f"✅ Berhasil klik upload button dengan selector: {selector}")
-                    break
-                await asyncio.sleep(1)
+            # Gunakan selector yang diberikan untuk Local File
+            upload_clicked = await self.safe_click("span.source-arr-item-name", "upload button Local File", timeout=60000)
             
             if not upload_clicked:
-                logger.error("❌ Gagal menemukan tombol upload")
+                logger.error("❌ Gagal menemukan tombol upload Local File")
                 return []
             
             await asyncio.sleep(3)
@@ -1458,34 +1364,14 @@ class TeraboxPlaywrightUploader:
             await asyncio.sleep(wait_time)
             await self.wait_for_network_idle(int(self.timeout * 0.5))
 
-            # Step 6: Klik Generate Link
-            generate_success = False
-            generate_selectors = [
-                "div.share-way span",
-                ".share-way span",
-                "button:has-text('Generate Link')",
-                "div:has-text('Generate Link')",
-                "span:has-text('Generate')"
-            ]
+            # Step 6: Klik Generate Link dengan selector yang diberikan
+            logger.info("🖱️ Mencari dan mengklik tombol Generate Link...")
             
-            for retry in range(3):
-                # Cek page status sebelum setiap percobaan generate
-                if self.page.is_closed():
-                    logger.error("❌ Page tertutup selama generate link")
-                    return []
-                    
-                for selector in generate_selectors:
-                    generate_success = await self.safe_click(selector, f"generate link button dengan {selector} (attempt {retry+1})", 120000)
-                    if generate_success:
-                        break
-                    await asyncio.sleep(1)
-                
-                if generate_success:
-                    break
-                await asyncio.sleep(5)
+            # Gunakan selector yang diberikan untuk Generate Link
+            generate_success = await self.safe_click("span.create-btn-text", "generate link button", timeout=120000)
             
             if not generate_success:
-                logger.error("❌ Could not click Generate Link after 3 attempts")
+                logger.error("❌ Could not click Generate Link")
                 return []
             
             # Wait for link generation
@@ -2073,6 +1959,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 **AUTO-TIMEOUT** - Jika download 20 menit, upload timeout 30 menit
 📊 **TIME TRACKING** - Tracking waktu download untuk optimasi upload
 🛡️ **STABILITY** - Sistem lebih stabil dengan timeout yang tepat
+🎯 **ELEMENT UPDATE** - Selector terbaru untuk upload Terabox
 
 **Perintah yang tersedia:**
 /download [url] - Download folder Mega.nz
@@ -2137,6 +2024,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔄 **AUTO-ADJUST** - Timeout upload menyesuaikan kompleksitas file
 🚫 **TIDAK ADA RETRY** - Jika gagal, proses berhenti
 📞 **ERROR REPORT** - Detail error dikirim ke Telegram
+🎯 **ELEMENT UPDATE** - Selector terbaru untuk upload Terabox
 
 **Catatan:**
 - Bot akan otomatis membuat folder di Terabox dengan nama yang sama
@@ -2146,6 +2034,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - Fitur anti-duplikasi mencegah file terupload double
 - **FITUR BARU**: Timeout upload dinamis berdasarkan durasi download
 - **LOGGING BARU**: File log dibuat per tanggal di folder /logs/
+- **ELEMENT BARU**: Selector terbaru untuk semua elemen upload Terabox
     """
     await update.message.reply_text(help_text)
 
@@ -2398,6 +2287,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text += f"\n**🚀 Upload Method:** SEMUA FILE SEKALIGUS"
         status_text += f"\n**🛡️ Anti-Duplikasi:** AKTIF"
         status_text += f"\n**⏱️ Timeout System:** DINAMIS berdasarkan durasi download"
+        status_text += f"\n**🎯 Element System:** SELECTOR TERBARU untuk Terabox"
         
         await update.message.reply_text(status_text)
         
@@ -2881,6 +2771,7 @@ def main():
     logger.info("📊 TIME TRACKING: Durasi download dilacak untuk optimasi timeout upload")
     logger.info("🚀 UPLOAD SYSTEM: Semua file diupload sekaligus tanpa batch")
     logger.info("🛡️ ANTI-DUPLIKASI: File tidak akan terupload double")
+    logger.info("🎯 ELEMENT UPDATE: Selector terbaru untuk semua elemen upload Terabox")
     application.run_polling()
 
 if __name__ == '__main__':
