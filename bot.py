@@ -1197,30 +1197,21 @@ class TeraboxPlaywrightUploader:
             logger.error(f"💥 Navigation process error: {e}")
             return False
 
-    async def create_new_folder(self, folder_name: str) -> bool:
-        """Buat folder baru di Terabox - DIPERBAIKI dengan selector baru"""
+    async def create_new_folder_in_dialog(self, folder_name: str) -> bool:
+        """Buat folder baru di dalam dialog pilih folder yang sudah terbuka"""
         try:
-            logger.info(f"📁 Membuat folder baru: {folder_name}")
+            logger.info(f"📁 Membuat folder baru dalam dialog: {folder_name}")
             
-            # PERBAIKAN: Gunakan selector yang diberikan untuk folder path
-            folder_dialog_success = await self.safe_click("span.upload-tips-path", "folder path selector", timeout=60000)
-            
-            if not folder_dialog_success:
-                logger.error("❌ Gagal membuka dialog pilih folder")
-                return False
-            
-            await asyncio.sleep(5)
-            
-            # Step 2: Klik tombol "New Folder" dengan selector yang diberikan
+            # Step 1: Klik tombol "New Folder" dengan selector yang diberikan
             new_folder_success = await self.safe_click("div.btn.btn1.create-dir", "new folder button", timeout=60000)
             
             if not new_folder_success:
-                logger.error("❌ Gagal klik tombol New Folder")
+                logger.error("❌ Gagal klik tombol New Folder dalam dialog")
                 return False
             
             await asyncio.sleep(3)
             
-            # Step 3: Klik dan isi nama folder dengan selector yang diberikan
+            # Step 2: Klik dan isi nama folder dengan selector yang diberikan
             folder_input = await self.page.wait_for_selector("input.folder-name-text", timeout=60000)
             
             if folder_input:
@@ -1228,82 +1219,64 @@ class TeraboxPlaywrightUploader:
                 await folder_input.click(click_count=2)
                 await self.page.keyboard.press('Backspace')
                 await folder_input.fill(folder_name)
-                logger.info("✅ Folder name filled")
+                logger.info("✅ Folder name filled dalam dialog")
             else:
-                logger.error("❌ Folder name input not found")
+                logger.error("❌ Folder name input not found dalam dialog")
                 return False
             
             await asyncio.sleep(2)
             
-            # Step 4: Klik tombol centang untuk konfirmasi nama folder dengan selector yang diberikan
+            # Step 3: Klik tombol centang untuk konfirmasi nama folder dengan selector yang diberikan
             folder_confirm_success = await self.safe_click("i.folder-name-commit", "folder name confirm button", timeout=60000)
             
             if not folder_confirm_success:
-                logger.error("❌ Gagal klik tombol konfirmasi nama folder")
+                logger.error("❌ Gagal klik tombol konfirmasi nama folder dalam dialog")
                 return False
             
             await asyncio.sleep(3)
             
-            # Step 5: Klik tombol "Confirm" untuk membuat folder dengan selector yang diberikan
-            create_confirm_success = await self.safe_click("div.btn.create-confirm", "create folder confirm button", timeout=60000)
-            
-            if not create_confirm_success:
-                logger.error("❌ Gagal klik tombol confirm pembuatan folder")
-                return False
-            
-            await asyncio.sleep(5)
-            
-            logger.info(f"✅ Folder '{folder_name}' berhasil dibuat di Terabox")
+            logger.info(f"✅ Folder '{folder_name}' berhasil dibuat dalam dialog")
             return True
             
         except Exception as e:
-            logger.error(f"💥 Error creating folder {folder_name}: {e}")
+            logger.error(f"💥 Error creating folder dalam dialog {folder_name}: {e}")
             return False
 
-    async def select_created_folder(self, folder_name: str) -> bool:
-        """Pilih folder yang sudah dibuat di Terabox"""
+    async def select_created_folder_in_dialog(self, folder_name: str) -> bool:
+        """Pilih folder yang sudah dibuat di dalam dialog pilih folder"""
         try:
-            logger.info(f"🎯 Memilih folder: {folder_name}")
+            logger.info(f"🎯 Memilih folder dalam dialog: {folder_name}")
             
-            # Buka dialog pilih folder
-            folder_dialog_success = await self.safe_click("span.upload-tips-path", "folder path selector", timeout=60000)
-            
-            if not folder_dialog_success:
-                logger.error("❌ Gagal membuka dialog pilih folder")
-                return False
-            
-            await asyncio.sleep(3)
-            
-            # Cari dan klik folder yang sudah dibuat
+            # Cari dan klik folder yang sudah dibuat dalam dialog
             folder_selector = f"div.folder-item:has-text('{folder_name}')"
-            folder_select_success = await self.safe_click(folder_selector, f"select folder {folder_name}", timeout=60000)
+            folder_select_success = await self.safe_click(folder_selector, f"select folder {folder_name} dalam dialog", timeout=60000)
             
             if not folder_select_success:
-                logger.error(f"❌ Gagal memilih folder {folder_name}")
+                logger.error(f"❌ Gagal memilih folder {folder_name} dalam dialog")
                 return False
             
             await asyncio.sleep(2)
             
             # Klik tombol confirm untuk memilih folder
-            confirm_success = await self.safe_click("div.btn.create-confirm", "confirm folder selection", timeout=60000)
+            confirm_success = await self.safe_click("div.btn.create-confirm", "confirm folder selection dalam dialog", timeout=60000)
             
             if not confirm_success:
-                logger.error("❌ Gagal konfirmasi pemilihan folder")
+                logger.error("❌ Gagal konfirmasi pemilihan folder dalam dialog")
                 return False
             
             await asyncio.sleep(3)
             
-            logger.info(f"✅ Folder '{folder_name}' berhasil dipilih")
+            logger.info(f"✅ Folder '{folder_name}' berhasil dipilih dalam dialog")
             return True
             
         except Exception as e:
-            logger.error(f"💥 Error selecting folder {folder_name}: {e}")
+            logger.error(f"💥 Error selecting folder dalam dialog {folder_name}: {e}")
             return False
 
     async def upload_all_files(self, folder_path: Path) -> List[str]:
         """
         Upload SEMUA file sekaligus dari folder download ke Terabox
-        dengan membuat folder baru terlebih dahulu menggunakan nama folder hasil download
+        dengan membuat folder baru SETELAH file dipilih
         """
         try:
             folder_name = folder_path.name
@@ -1313,19 +1286,6 @@ class TeraboxPlaywrightUploader:
             if self.page.is_closed():
                 logger.error("❌ Page sudah tertutup, tidak bisa melanjutkan upload")
                 return []
-            
-            # PERBAIKAN ALUR: BUAT FOLDER TERLEBIH DAHULU SEBELUM UPLOAD
-            # Step 1: Buat folder baru di Terabox dengan nama folder hasil download
-            logger.info(f"📁 Membuat folder '{folder_name}' di Terabox...")
-            folder_created = await self.create_new_folder(folder_name)
-            if not folder_created:
-                logger.warning("⚠️ Gagal membuat folder, melanjutkan upload ke root directory")
-            else:
-                # Step 2: Pilih folder yang sudah dibuat
-                logger.info(f"🎯 Memilih folder '{folder_name}' untuk upload...")
-                folder_selected = await self.select_created_folder(folder_name)
-                if not folder_selected:
-                    logger.warning("⚠️ Gagal memilih folder, melanjutkan upload ke root directory")
             
             # Dapatkan SEMUA file dari folder
             all_files = [f for f in folder_path.rglob('*') if f.is_file()]
@@ -1342,7 +1302,7 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Page tertutup sebelum klik upload")
                 return []
 
-            # Step 3: Klik tombol upload dengan selector yang diberikan
+            # Step 1: Klik tombol upload dengan selector yang diberikan
             logger.info("🖱️ Mengklik tombol upload Local File...")
             
             # Gunakan selector yang diberikan untuk Local File
@@ -1354,23 +1314,9 @@ class TeraboxPlaywrightUploader:
             
             await asyncio.sleep(3)
 
-            # Step 4: Cari elemen input file yang mendukung multiple
-            logger.info("🔍 Mencari elemen input file...")
-            
-            # Tunggu hingga file manager terbuka
-            await asyncio.sleep(3)
-            
-            # Cek page status sebelum upload files
-            if self.page.is_closed():
-                logger.error("❌ Page tertutup sebelum upload files")
-                return []
-            
-            # DAPATKAN SEMUA FILE DAN UPLOAD SEKALIGUS
-            file_paths = [str(f.absolute()) for f in all_files]
-            
-            # Step 5: Upload SEMUA file sekaligus dengan anti-duplikasi
+            # Step 2: Upload SEMUA file sekaligus dengan anti-duplikasi
             try:
-                logger.info(f"🚀 Mengupload {total_files} file sekaligus ke folder '{folder_name}'...")
+                logger.info(f"🚀 Mengupload {total_files} file sekaligus...")
                 
                 # Gunakan input file yang tersedia di halaman
                 file_input = await self.page.query_selector("input[type='file']")
@@ -1388,31 +1334,43 @@ class TeraboxPlaywrightUploader:
                     return []
 
                 # Upload SEMUA file sekaligus dengan safe upload
+                file_paths = [str(f.absolute()) for f in all_files]
                 if not await self.safe_upload_files(file_input, file_paths, "SEMUA FILE SEKALIGUS"):
                     logger.error("❌ Gagal upload semua file sekaligus")
                     return []
                 
                 logger.info(f"✅ Berhasil mengupload SEMUA {total_files} file sekaligus")
-                await asyncio.sleep(20)
+                await asyncio.sleep(10)  # Tunggu file muncul di daftar upload
                 
             except Exception as e:
                 logger.error(f"❌ Gagal upload semua file sekaligus: {e}")
                 return []
 
-            # Cek page status sebelum generate link
-            if self.page.is_closed():
-                logger.error("❌ Page tertutup sebelum generate link")
-                return []
-
-            # Step 6: Tunggu upload selesai
-            logger.info("⏳ Menunggu proses upload selesai...")
+            # Step 3: BUAT FOLDER BARU SETELAH FILE DIPILIH
+            logger.info("🔄 Memulai proses pembuatan folder SETELAH file dipilih...")
             
-            # Tunggu waktu yang disesuaikan dengan jumlah file dan timeout dinamis
-            wait_time = min(30 + total_files * 3, self.timeout / 1000 * 0.6)  # Maksimal 60% dari timeout
-            await asyncio.sleep(wait_time)
-            await self.wait_for_network_idle(int(self.timeout * 0.5))
+            # Step 3.1: Klik folder path selector untuk membuka dialog pilih folder
+            logger.info("🖱️ Membuka dialog pilih folder...")
+            folder_dialog_success = await self.safe_click("span.upload-tips-path", "folder path selector", timeout=60000)
+            
+            if not folder_dialog_success:
+                logger.error("❌ Gagal membuka dialog pilih folder")
+                # Lanjutkan tanpa membuat folder, upload ke root directory
+                logger.warning("⚠️ Gagal membuka dialog folder, melanjutkan upload ke root directory")
+            else:
+                # Step 3.2: Buat folder baru di dalam dialog pilih folder
+                logger.info(f"📁 Membuat folder '{folder_name}' di Terabox...")
+                folder_created = await self.create_new_folder_in_dialog(folder_name)
+                if not folder_created:
+                    logger.warning("⚠️ Gagal membuat folder, melanjutkan upload ke root directory")
+                else:
+                    # Step 3.3: Pilih folder yang sudah dibuat
+                    logger.info(f"🎯 Memilih folder '{folder_name}' untuk upload...")
+                    folder_selected = await self.select_created_folder_in_dialog(folder_name)
+                    if not folder_selected:
+                        logger.warning("⚠️ Gagal memilih folder, melanjutkan upload ke root directory")
 
-            # Step 7: Klik Generate Link dengan selector yang diberikan
+            # Step 4: Klik Generate Link dengan selector yang diberikan
             logger.info("🖱️ Mencari dan mengklik tombol Generate Link...")
             
             # Gunakan selector yang diberikan untuk Generate Link
@@ -1432,7 +1390,7 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Page tertutup sebelum extract links")
                 return []
 
-            # Step 8: Extract share links
+            # Step 5: Extract share links
             links = await self.extract_share_links()
             
             if links:
@@ -1482,7 +1440,7 @@ class TeraboxPlaywrightUploader:
             return []
 
     async def upload_folder_via_playwright(self, folder_path: Path) -> List[str]:
-        """Main method untuk upload folder menggunakan Playwright dengan session persistence dan buat folder"""
+        """Main method untuk upload folder menggunakan Playwright dengan session persistence dan buat folder SETELAH file dipilih"""
         try:
             # Reset uploaded files tracker untuk session baru
             self.uploaded_files_tracker.clear()
@@ -1492,7 +1450,8 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Browser setup failed, cannot proceed with upload")
                 return []
 
-            logger.info(f"🚀 Starting Playwright upload for folder: {folder_path}")
+            logger.info(f"🚀 Starting Playwright upload untuk folder: {folder_path}")
+            logger.info("🎯 ALUR BARU: Select File → Buat Folder → Generate Link")
             
             # Step 1: Check login status dan login jika diperlukan
             if not await self.login_to_terabox():
@@ -1504,7 +1463,7 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Navigation to upload page failed")
                 return []
             
-            # Step 3: Upload files (upload SEMUA file sekaligus dengan buat folder first)
+            # Step 3: Upload files dengan alur baru: Select File → Buat Folder → Generate Link
             links = await self.upload_all_files(folder_path)
             
             if links:
@@ -1623,7 +1582,7 @@ class UploadManager:
                 f"📤 Memulai upload ke Terabox...\n"
                 f"🔢 Job Number: #{job_number}\n"
                 f"📁 Folder: {folder_path.name}\n"
-                f"🎯 Method: BUAT FOLDER → UPLOAD FILE → GENERATE LINK\n"
+                f"🎯 Method: UPLOAD FILE → BUAT FOLDER → GENERATE LINK\n"
                 f"🛡️ Anti-Duplikasi: AKTIF\n"
                 f"⏰ Timeout: {upload_timeout/1000/60:.1f} menit (dinamis berdasarkan download)"
             )
@@ -1662,7 +1621,7 @@ class UploadManager:
             await self.send_progress_message(
                 update, context, job_id,
                 f"🔄 Mencoba login dan upload otomatis...\n"
-                f"📝 Alur: BUAT FOLDER → UPLOAD SEMUA FILE SEKALIGUS → Generate Link\n"
+                f"📝 Alur: UPLOAD SEMUA FILE SEKALIGUS → BUAT FOLDER → Generate Link\n"
                 f"🛡️ Anti-Duplikasi: File tidak akan terupload double\n"
                 f"🎯 Batch size: SEMUA FILE SEKALIGUS\n"
                 f"⏱️ Timeout: {upload_timeout/1000/60:.1f} menit"
@@ -1680,7 +1639,7 @@ class UploadManager:
                         f"🔢 Job Number: #{job_number}\n"
                         f"🔗 {len(links)} links generated\n"
                         f"📁 Folder: {folder_path.name}\n"
-                        f"🎯 Method: BUAT FOLDER → UPLOAD SEMUA FILE SEKALIGUS\n"
+                        f"🎯 Method: UPLOAD SEMUA FILE SEKALIGUS → BUAT FOLDER\n"
                         f"🛡️ Anti-Duplikasi: File terproteksi dari duplikat\n"
                         f"⏱️ Timeout digunakan: {upload_timeout/1000/60:.1f} menit"
                     )
@@ -1903,7 +1862,7 @@ class DownloadProcessor:
                         f"🎯 Platform: {platform}\n"
                         f"⏱️ Download duration: {download_duration:.2f}s\n"
                         f"⏰ Upload timeout: {download_duration * 1.5:.1f}s (dinamis)\n"
-                        f"🎯 Method: BUAT FOLDER → UPLOAD SEMUA FILE SEKALIGUS"
+                        f"🎯 Method: UPLOAD FILE → BUAT FOLDER → GENERATE LINK"
                     )
                     
                     links = await self.upload_manager.upload_to_terabox(actual_download_path, update, context, job_id)
@@ -2008,6 +1967,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 **TIME TRACKING** - Tracking waktu download untuk optimasi upload
 🛡️ **STABILITY** - Sistem lebih stabil dengan timeout yang tepat
 🎯 **ELEMENT UPDATE** - Selector terbaru untuk upload Terabox
+🔄 **ALUR BARU** - Upload File → Buat Folder → Generate Link
 
 **Perintah yang tersedia:**
 /download [url] - Download folder Mega.nz
@@ -2064,6 +2024,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✅ Generate multiple share links
 ✅ Session persistence untuk login
 🛡️ ANTI-DUPLIKASI file upload
+🔄 **ALUR BARU**: Upload File → Buat Folder → Generate Link
 
 **UPDATE SISTEM:**
 ✅ **LOGGING HARIAN** - File log terpisah per tanggal
@@ -2073,6 +2034,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🚫 **TIDAK ADA RETRY** - Jika gagal, proses berhenti
 📞 **ERROR REPORT** - Detail error dikirim ke Telegram
 🎯 **ELEMENT UPDATE** - Selector terbaru untuk upload Terabox
+🔄 **ALUR DIPERBAIKI** - File diupload dulu, baru buat folder
 
 **Catatan:**
 - Bot akan otomatis membuat folder di Terabox dengan nama folder hasil download
@@ -2083,6 +2045,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - **FITUR BARU**: Timeout upload dinamis berdasarkan durasi download
 - **LOGGING BARU**: File log dibuat per tanggal di folder /logs/
 - **ELEMENT BARU**: Selector terbaru untuk semua elemen upload Terabox
+- **ALUR BARU**: Upload file terlebih dahulu, kemudian buat folder dalam dialog
     """
     await update.message.reply_text(help_text)
 
@@ -2128,7 +2091,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📥 URL: {folder_url[:50]}...\n"
             f"📊 Queue position: {download_queue.qsize()}\n"
             f"⏳ Active downloads: {len(active_downloads)}/{MAX_CONCURRENT_DOWNLOADS}\n"
-            f"🎯 Upload method: BUAT FOLDER → UPLOAD SEMUA FILE SEKALIGUS\n"
+            f"🎯 Upload method: UPLOAD FILE → BUAT FOLDER → GENERATE LINK\n"
             f"🛡️ Anti-duplikasi: AKTIF\n"
             f"⏱️ Timeout tracking: AKTIF\n"
             f"🛑 Gunakan `/stop {job_id}` untuk membatalkan"
@@ -2200,7 +2163,7 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📁 Name: {folder_path.name}\n"
             f"📄 Files: {file_count}\n"
             f"🆔 Job ID: {job_id}\n"
-            f"🎯 Method: BUAT FOLDER → UPLOAD SEMUA FILE SEKALIGUS\n"
+            f"🎯 Method: UPLOAD FILE → BUAT FOLDER → GENERATE LINK\n"
             f"🛡️ Anti-duplikasi: AKTIF\n"
             f"⏰ Timeout: 10 menit (default manual upload)\n"
             f"🔄 Starting upload to Terabox..."
@@ -2332,10 +2295,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_text += f"\n\n**🛑 Usage:** `/stop job_id` to stop a process"
         status_text += f"\n**📁 Usage:** `/listfolders` to see downloaded folders"
         status_text += f"\n**✏️ Usage:** `/rename old_name new_name` to rename folders"
-        status_text += f"\n**🚀 Upload Method:** BUAT FOLDER → UPLOAD SEMUA FILE SEKALIGUS"
+        status_text += f"\n**🚀 Upload Method:** UPLOAD FILE → BUAT FOLDER → GENERATE LINK"
         status_text += f"\n**🛡️ Anti-Duplikasi:** AKTIF"
         status_text += f"\n**⏱️ Timeout System:** DINAMIS berdasarkan durasi download"
         status_text += f"\n**🎯 Element System:** SELECTOR TERBARU untuk Terabox"
+        status_text += f"\n**🔄 Alur Baru:** Upload file dulu, baru buat folder"
         
         await update.message.reply_text(status_text)
         
@@ -2817,9 +2781,10 @@ def main():
     logger.info("📅 LOGGING SYSTEM: File log dibuat per tanggal di folder /home/ubuntu/bot-tele/logs/")
     logger.info("⏱️ TIMEOUT SYSTEM: Timeout upload dinamis berdasarkan durasi download")
     logger.info("📊 TIME TRACKING: Durasi download dilacak untuk optimasi timeout upload")
-    logger.info("🚀 UPLOAD SYSTEM: BUAT FOLDER → UPLOAD FILE → GENERATE LINK")
+    logger.info("🚀 UPLOAD SYSTEM: UPLOAD FILE → BUAT FOLDER → GENERATE LINK")
     logger.info("🛡️ ANTI-DUPLIKASI: File tidak akan terupload double")
     logger.info("🎯 ELEMENT UPDATE: Selector terbaru untuk semua elemen upload Terabox")
+    logger.info("🔄 ALUR BARU: File diupload terlebih dahulu, baru buat folder dalam dialog")
     application.run_polling()
 
 if __name__ == '__main__':
