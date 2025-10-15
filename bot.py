@@ -846,8 +846,8 @@ class TeraboxPlaywrightUploader:
                 await file_input.set_input_files(files_to_upload)
                 logger.info(f"✅ Successfully sent {len(files_to_upload)} files to upload queue")
                 
-                # Tunggu lebih lama untuk upload banyak file - timeout dinamis
-                wait_time = min(15 + len(files_to_upload) * 0.5, 60)  # Maksimal 60 detik
+                # Tunggu sebentar untuk upload process start
+                wait_time = min(5 + len(files_to_upload) * 0.1, 15)  # Maksimal 15 detik
                 logger.info(f"⏳ Waiting for upload process to start ({wait_time} seconds)...")
                 await asyncio.sleep(wait_time)
                 
@@ -856,15 +856,7 @@ class TeraboxPlaywrightUploader:
                     file_id = f"{Path(file_path).name}_{Path(file_path).stat().st_size}"
                     self.uploaded_files_tracker.add(file_id)
                 
-                # Tunggu lebih lama untuk upload completion - disesuaikan dengan jumlah file dan timeout dinamis
-                wait_time = min(30 + len(files_to_upload) * 2, self.timeout / 1000 * 0.8)  # Maksimal 80% dari timeout
-                logger.info(f"⏳ Waiting for all files to upload ({wait_time:.1f} seconds)...")
-                await asyncio.sleep(wait_time)
-                
-                # Cek progress upload dengan timeout dinamis
-                await self.wait_for_network_idle(int(self.timeout * 0.5))  # 50% dari timeout total
-                
-                logger.info(f"✅ Successfully uploaded {len(files_to_upload)} files in single batch")
+                logger.info(f"✅ Successfully queued {len(files_to_upload)} files for upload")
                 return True
                 
             except Exception as e:
@@ -1312,7 +1304,7 @@ class TeraboxPlaywrightUploader:
                     return False
                 
                 logger.info(f"✅ Berhasil menambahkan {len(file_paths)} file ke upload list")
-                await asyncio.sleep(10)  # Tunggu file muncul di daftar upload
+                await asyncio.sleep(5)  # Tunggu file muncul di daftar upload
                 
                 return True
                 
@@ -1336,6 +1328,8 @@ class TeraboxPlaywrightUploader:
             if not folder_dialog_success:
                 logger.error("❌ Gagal membuka dialog pilih folder")
                 return False
+            
+            await asyncio.sleep(3)
             
             # Step 2: Buat folder baru di dalam dialog pilih folder
             logger.info(f"📁 Membuat folder '{folder_name}' di Terabox...")
@@ -1374,7 +1368,12 @@ class TeraboxPlaywrightUploader:
                 logger.error("❌ Could not click Generate Link")
                 return []
             
-            # Wait for link generation dengan timeout dinamis
+            # Wait for upload completion dengan timeout dinamis
+            upload_wait_time = min(self.timeout / 1000 * 0.8, 600)  # Maksimal 10 menit
+            logger.info(f"⏳ Waiting for all files to upload ({upload_wait_time:.1f} seconds)...")
+            await asyncio.sleep(upload_wait_time)
+            
+            # Wait for link generation
             logger.info("⏳ Waiting for link generation...")
             await asyncio.sleep(30)
             await self.wait_for_network_idle(120000)
